@@ -1,31 +1,49 @@
-module VeriTraceMix.CryptoSpec {
+// Crypto/CryptoSpec.dfy
+// Cryptographic specifications for the traceable mixnet
 
-  datatype Message = Message(v: int)
-
-  datatype Cipher = Cipher(enc: int, tag: int)
-
-  type Key
-  type TraceKey
-
-  function Encrypt(m: Message, k: Key): Cipher
-
-  function ReEncrypt(c: Cipher, k: Key): Cipher
-
-  function Trace(c: Cipher, tk: TraceKey): int
-
-  ghost predicate EncryptInjective(k: Key)
-  {
-    forall m1, m2 :: Encrypt(m1, k).enc == Encrypt(m2, k).enc ==> m1 == m2
-  }
-
-  ghost predicate ReEncryptPreservesTag(c: Cipher, k: Key)
-  {
-    ReEncrypt(c, k).tag == c.tag
-  }
-
-  ghost predicate TraceCorrect(c: Cipher, tk: TraceKey)
-  {
-    Trace(c, tk) == c.tag
-  }
-
+module CryptoSpec {
+  
+  // Abstract types for cryptographic objects
+  type PublicKey
+  type SecretKey
+  type Ciphertext
+  type Plaintext
+  type Randomness
+  
+  // Key pair generation
+  ghost predicate ValidKeyPair(pk: PublicKey, sk: SecretKey)
+  
+  // Encryption function
+  ghost function Encrypt(pk: PublicKey, m: Plaintext, r: Randomness): Ciphertext
+  
+  // Decryption function
+  ghost function Decrypt(sk: SecretKey, c: Ciphertext): Plaintext
+    requires exists pk :: ValidKeyPair(pk, sk)
+  
+  // Re-encryption: takes a ciphertext and produces a fresh ciphertext
+  // of the same plaintext under the same public key
+  ghost function ReEncrypt(pk: PublicKey, c: Ciphertext, r: Randomness): Ciphertext
+  
+  // Correctness of encryption/decryption
+  lemma DecryptionCorrectness(pk: PublicKey, sk: SecretKey, m: Plaintext, r: Randomness)
+    requires ValidKeyPair(pk, sk)
+    ensures Decrypt(sk, Encrypt(pk, m, r)) == m
+  
+  // Re-encryption preserves plaintext
+  lemma ReEncryptionCorrectness(pk: PublicKey, sk: SecretKey, c: Ciphertext, r: Randomness)
+    requires ValidKeyPair(pk, sk)
+    requires exists m, r0 :: c == Encrypt(pk, m, r0)
+    ensures Decrypt(sk, ReEncrypt(pk, c, r)) == Decrypt(sk, c)
+  
+  // Homomorphic property (if needed for mixnet)
+  // Can be extended based on the specific cryptosystem
+  
+  ghost predicate IsFreshRandomness(r: Randomness)
+  
+  // Two ciphertexts with different randomness are different
+  lemma RandomnessGivesDistinctCiphertexts(pk: PublicKey, m: Plaintext, r1: Randomness, r2: Randomness)
+    requires IsFreshRandomness(r1)
+    requires IsFreshRandomness(r2)
+    requires r1 != r2
+    ensures Encrypt(pk, m, r1) != Encrypt(pk, m, r2)
 }
