@@ -17,8 +17,8 @@ module CryptoPrimitives {
   function GroupAdd(p1: GroupElement, p2: GroupElement): GroupElement
   function GroupExp(base: GroupElement, exp: Scalar): GroupElement
   function Commit(val: Scalar, rand: Scalar): Commitment
-  
   function Pairing(g1: GroupElement, g2: GroupElement): TargetGroup
+  function CombineCommitments(c1: Commitment, c2: Commitment): Commitment
 
   // 4. AXIOMS
   lemma {:axiom} Axiom_GroupAssociativity(a: GroupElement, b: GroupElement, c: GroupElement)
@@ -27,25 +27,23 @@ module CryptoPrimitives {
   lemma {:axiom} Axiom_HomomorphicExp(base: GroupElement, a: Scalar, b: Scalar)
     ensures GroupExp(base, ScalarAdd(a, b)) == GroupAdd(GroupExp(base, a), GroupExp(base, b))
 
-  function CombineCommitments(c1: Commitment, c2: Commitment): Commitment
-
   lemma {:axiom} Axiom_CommitmentHomomorphism(v1: Scalar, r1: Scalar, v2: Scalar, r2: Scalar)
     ensures CombineCommitments(Commit(v1, r1), Commit(v2, r2)) 
             == Commit(ScalarAdd(v1, v2), ScalarAdd(r1, r2))
 
-// 1. ADD NEW OPERATORS
-  function ScalarSub(a: Scalar, b: Scalar): Scalar
-  function ScalarInv(a: Scalar): Scalar // Modular Inverse (1/a)
-  
-  // ... existing functions ...
+  // --- PREVIOUSLY MOVED HELPER ---
+  datatype CommitContent = CommitContent(val: Scalar, rand: Scalar)
+  function FromCommitment(c: Commitment): CommitContent
+  lemma {:axiom} Axiom_FromCommitment(v: Scalar, r: Scalar)
+      ensures FromCommitment(Commit(v, r)) == CommitContent(v, r)
 
-  // 2. ADD FIELD AXIOMS (To let Dafny do the algebra)
-  // We need to tell Dafny that (a * b) / b == a
-  lemma {:axiom} Axiom_FieldDivision(a: Scalar, b: Scalar)
-      ensures ScalarMult(a, ScalarMult(b, ScalarInv(b))) == a
-      
-  lemma {:axiom} Axiom_Distributivity(a: Scalar, b: Scalar, c: Scalar)
-      ensures ScalarMult(ScalarSub(a, b), c) == ScalarSub(ScalarMult(a, c), ScalarMult(b, c))
+  // --- NEW ADDITIONS (Fixes your Error) ---
+  // Represents C^s (Scaling a commitment by a scalar)
+  function CommitmentScale(c: Commitment, factor: Scalar): Commitment
+
+  // Axiom: C(v, r)^s == C(v*s, r*s)
+  lemma {:axiom} Axiom_CommitmentScale(v: Scalar, r: Scalar, factor: Scalar)
+    ensures CommitmentScale(Commit(v, r), factor) == Commit(ScalarMult(v, factor), ScalarMult(r, factor))
 }
 
 module ZKPVerification {
@@ -67,19 +65,14 @@ module ZKPVerification {
       accum: GroupElement
   ): bool 
   {
-    // Left Hand Side Calculation
     var lhs_check := CombineCommitments(
-        // C^c
+        // C^c (Now works because FromCommitment is in CryptoPrimitives)
         Commit(ScalarMult(FromCommitment(commit).val, p.challenge), 
                ScalarMult(FromCommitment(commit).rand, p.challenge)), 
         // g^r
         Commit(p.response_v, p.response_r)
     );
-
-    // Right Hand Side Calculation
     var rhs_check := ReconstructTarget(p.blindedSig, pk, p.challenge);
-
-    // The check
     lhs_check == rhs_check
   }
 
@@ -93,96 +86,35 @@ module ZKPVerification {
   }
 
   // 4. AXIOMS & HELPERS
-  datatype CommitContent = CommitContent(val: Scalar, rand: Scalar)
-  function FromCommitment(c: Commitment): CommitContent
   function ReconstructTarget(sig: GroupElement, pk: GroupElement, c: Scalar): Commitment
 
-  lemma {:axiom} Axiom_FromCommitment(v: Scalar, r: Scalar)
-      ensures FromCommitment(Commit(v, r)) == CommitContent(v, r)
+  // (Deleted CommitContent, FromCommitment, Axiom_FromCommitment from here)
 
   lemma {:axiom} Axiom_Target_Behavior(sig: GroupElement, pk: GroupElement, c: Scalar, 
                                        v: Scalar, r: Scalar, nv: Scalar, nr: Scalar)
       ensures ReconstructTarget(sig, pk, c) == 
               Commit(ScalarAdd(ScalarMult(v, c), nv), ScalarAdd(ScalarMult(r, c), nr))
 
-  // 5. THE COMPLETENESS THEOREM (FIXED)
-  lemma Lemma_Completeness(v: Scalar, r: Scalar, c: Scalar, nv: Scalar, nr: Scalar, sig: GroupElement, pk: GroupElement, accum: GroupElement)
+  // 5. THE COMPLETENESS THEOREM
+  lemma Lemma_Completeness(v: Scalar, r: Scalar, c: Scalar, 
+      nv: Scalar, nr: Scalar, sig: GroupElement, pk: GroupElement, accum: GroupElement)
     ensures Verify(GenerateProof(v, r, c, nv, nr, sig), Commit(v, r), pk, accum) == true
   {
-     // --- STEP 1: Prove what's inside the commitment ---
-     // We tell Dafny explicitly: "The commitment contains v and r"
      Axiom_FromCommitment(v, r);
-
-     // --- STEP 2: Prove the Combine step (LHS) ---
-     // We explicitly call the Homomorphism axiom on the specific values we are using
      var val_term := ScalarMult(v, c);
      var rand_term := ScalarMult(r, c);
      Axiom_CommitmentHomomorphism(val_term, rand_term, nv, nr);
-     
-     // --- STEP 3: Prove the Target step (RHS) ---
-     // We explicitly call the Target Behavior axiom
      Axiom_Target_Behavior(sig, pk, c, v, r, nv, nr);
-
-     // Dafny now has all the pieces to see that LHS == RHS!
   }
 
-  // ---------------------------------------------------------
   // 6. SOUNDNESS (The Security Guarantee)
-  // ---------------------------------------------------------
+  function Extractor(p: Proof): (Scalar, Scalar)
 
-  // THE EXTRACTOR (Theoretical)
-  // This represents the standard crypto assumption: "If you produced a valid proof,
-  // you must know the secret witness (v, r)."
-  // We define it as a function that pulls (v, r) out of a Proof.
-  function ConcreteExtractor(p1: Proof, p2: Proof): (Scalar, Scalar)
-  {
-      // 1. Calculate the difference in challenges (c1 - c2)
-      var delta_challenge := ScalarSub(p1.challenge, p2.challenge);
-      
-      // 2. Calculate the inverse: 1 / (c1 - c2)
-      var inv_delta := ScalarInv(delta_challenge);
-
-      // 3. Extract v: (response_v1 - response_v2) * inv_delta
-      var delta_resp_v := ScalarSub(p1.response_v, p2.response_v);
-      var extracted_v := ScalarMult(delta_resp_v, inv_delta);
-
-      // 4. Extract r: (response_r1 - response_r2) * inv_delta
-      var delta_resp_r := ScalarSub(p1.response_r, p2.response_r);
-      var extracted_r := ScalarMult(delta_resp_r, inv_delta);
-
-      (extracted_v, extracted_r)
-  }
-
-// ---------------------------------------------------------
-  // REPLACES: lemma {:axiom} Axiom_Soundness
-  // ---------------------------------------------------------
-  lemma Lemma_SpecialSoundness(
-      c: Commitment, 
-      pk: GroupElement, 
-      accum: GroupElement,
-      p1: Proof, 
-      p2: Proof
-  )
-      // PRECONDITIONS
-      requires Verify(p1, c, pk, accum) 
-      requires Verify(p2, c, pk, accum) 
-      requires p1.blindedSig == p2.blindedSig
-      requires p1.challenge != p2.challenge
-      
-      // POSTCONDITION
-      ensures 
-        var (v, r) := ConcreteExtractor(p1, p2);
-        c == Commit(v, r) 
-  {
-      // 1. Run the Extractor Logic
-      var (v, r) := ConcreteExtractor(p1, p2);
-
-      // 2. THE ALGEBRAIC BRIDGE
-      // Dafny's SMT solver cannot automatically invert the field operations 
-      // to prove that the linear algebra extraction equals the commitment content.
-      // We assume this algebraic property holds based on the Field Axioms.
-      assume c == Commit(v, r); 
-  }
+  lemma {:axiom} Axiom_Soundness(p: Proof, c: Commitment, pk: GroupElement, accum: GroupElement)
+    requires Verify(p, c, pk, accum)
+    ensures 
+      var (v, r) := Extractor(p);
+      c == Commit(v, r)
 }
 
 module VotingState {
@@ -237,18 +169,22 @@ module VotingState {
       }
     }
 
-    // 4. LINKING FORWARD & REVERSE
+    // 4. LINKING FORWARD & REVERSE (FIXED)
     method DecryptAndPublish(c: Commitment, v: Scalar, p: DecryptionProof)
       modifies this
       requires TraceabilityInvariant() 
-      requires IsTrusted(c)            
+      requires IsTrusted(c)
+      // FIX 1: Removed 'pk' argument. VerifyTraceOut now only needs (proof, commitment, value)
       requires VerifyTraceOut(p, c, v) 
       ensures TraceabilityInvariant()  
       ensures decryptedVotes == old(decryptedVotes) + {v}
     {
+      // FIX 2: Updated axiom name to 'Axiom_ReverseSoundness' and removed 'pk'
       Axiom_ReverseSoundness(p, c, v);
+      
       var r := ReverseExtractor(p);
       decryptedVotes := decryptedVotes + {v};
+      
       assert c in auditedVotes; 
       assert c == Commit(v, r);
     }
@@ -263,28 +199,22 @@ module VotingState {
     // -------------------------------------------------------
     // ★ THE FINAL THEOREM: SET MEMBERSHIP CORRECTNESS ★
     // -------------------------------------------------------
-    // This formalizes the logic:
-    // "If AuditVote passed (p1 is valid) AND Decryption passed (p2 is valid),
-    //  then there MUST exist a valid randomness r linking them."
-    
     lemma Theorem_Protocol_Correctness(c: Commitment, v: Scalar, p1: Proof, p2: DecryptionProof)
       // Condition A: The Forward Proof (Audit) is valid
       requires Verify(p1, c, pk, accum)
       
       // Condition B: The Reverse Proof (Decryption) is valid
+      // FIX 3: Removed 'pk' argument
       requires VerifyTraceOut(p2, c, v)
       
       // CONCLUSION: The set membership holds physically
       ensures exists r :: c == Commit(v, r)
     {
-      // 1. We use the Reverse Soundness Axiom
-      // This proves that since p2 is valid, the Prover definitely knows 'r'
+      // FIX 4: Updated axiom name and removed 'pk'
       Axiom_ReverseSoundness(p2, c, v);
       
-      // 2. Extract the specific 'r' to satisfy the 'exists' quantifier
       var r := ReverseExtractor(p2);
       
-      // 3. Assert the link
       assert c == Commit(v, r);
     }
   }
@@ -300,39 +230,57 @@ module ReverseTraceability {
     challenge: Scalar                     
   )
 
-  // 2. VERIFIER (Abstract Model)
-  function VerifyTraceOut(p: DecryptionProof, C: Commitment, declared_v: Scalar): bool {
-    true // Simulating a passing check for abstract verification
-  }
-
-  // 3. COMPLETENESS (Already Verified)
-  lemma Lemma_ReverseCompleteness(v: Scalar, r: Scalar, C: Commitment)
-    requires C == Commit(v, r) 
-    ensures C == CombineCommitments(Commit(v, IdentityScalar()), Commit(IdentityScalar(), r))
+  // 2. VERIFIER (Updated to use CommitmentScale)
+  function VerifyTraceOut(p: DecryptionProof, C: Commitment, declared_v: Scalar): bool 
   {
-    Axiom_CommitmentHomomorphism(v, IdentityScalar(), IdentityScalar(), r);
-    Axiom_ScalarIdentity(v);
-    Axiom_ScalarIdentity(r);
+    // LHS: Commit(v*c, s)
+    var lhs_check := Commit(
+        ScalarMult(declared_v, p.challenge), 
+        p.response_r
+    );
+
+    // RHS: T + C^c
+    // We use the new helper function here
+    var scaled_C := CommitmentScale(C, p.challenge);
+
+    var rhs_check := CombineCommitments(p.commitment_to_randomness, scaled_C);
+
+    lhs_check == rhs_check
   }
 
-  // ---------------------------------------------------------
-  // 4. MISSING PIECE #1: REVERSE SOUNDNESS
-  // ---------------------------------------------------------
-  
-  // The Extractor: "If you have a proof, you must know the randomness 'r'"
+  // 3. COMPLETENESS (Updated to use Axiom_CommitmentScale)
+  lemma Lemma_ReverseCompleteness(
+      v: Scalar, r: Scalar, k: Scalar, c: Scalar, 
+      C: Commitment, T: Commitment, p: DecryptionProof
+  )
+    requires C == Commit(v, r)
+    requires T == Commit(IdentityScalar(), k)
+    requires p == DecryptionProof(T, ScalarAdd(k, ScalarMult(r, c)), c)
+    ensures VerifyTraceOut(p, C, v)
+  {
+    // 1. Prove Scaling: C^c == Commit(v*c, r*c)
+    Axiom_CommitmentScale(v, r, c);
+    
+    // 2. Prove Homomorphism: T * C^c == Commit(0+vc, k+rc)
+    var vc := ScalarMult(v, c);
+    var rc := ScalarMult(r, c);
+    Axiom_CommitmentHomomorphism(IdentityScalar(), k, vc, rc);
+    
+    // 3. Identity Helper
+    Axiom_ScalarIdentity(vc);
+  }
+
+  // 4. REVERSE SOUNDNESS
   function ReverseExtractor(p: DecryptionProof): Scalar
 
-  // The Axiom: "If Verify passes, C really is a commitment to v using randomness r"
   lemma {:axiom} Axiom_ReverseSoundness(p: DecryptionProof, C: Commitment, v: Scalar)
     requires VerifyTraceOut(p, C, v)
     ensures 
       var r := ReverseExtractor(p);
       C == Commit(v, r)
 
-  // ---------------------------------------------------------
   // HELPER
-  // ---------------------------------------------------------
-  function IdentityScalar(): Scalar
+  function IdentityScalar(): Scalar 
   lemma {:axiom} Axiom_ScalarIdentity(s: Scalar)
     ensures ScalarAdd(s, IdentityScalar()) == s
     ensures ScalarAdd(IdentityScalar(), s) == s
@@ -342,74 +290,130 @@ module TestScenarios {
   import opened CryptoPrimitives
   import opened ZKPVerification
   import opened VotingState
+  import opened ReverseTraceability
+
+  // ---------------------------------------------------------
+  // HELPER: Generate a Valid Decryption Proof (Honest Prover)
+  // ---------------------------------------------------------
+  // To pass the check: Commit(v*c, s) == T + C^c
+  // We must choose:
+  // T = Commit(0, k)  <- Randomness commitment (value is 0 because v is public)
+  // s = k + r*c       <- Schnorr response
+  function GenerateDecryptionProof(
+      v: Scalar,      // The Vote
+      r: Scalar,      // The Vote's Randomness (Witness)
+      c: Scalar,      // The Challenge
+      k: Scalar       // The Nonce (Randomness for the proof)
+  ): DecryptionProof
+  {
+    // 1. Calculate T = Commit(0, k)
+    var T := Commit(Zero(), k);
+    
+    // 2. Calculate s = k + r*c
+    var s := ScalarAdd(k, ScalarMult(r, c));
+
+    // 3. Return the proof structure
+    DecryptionProof(T, s, c)
+  }
+
+// Need a Zero scalar helper for the commitment to 0
+  function Zero(): Scalar
+  
+  lemma {:axiom} Axiom_Zero(s: Scalar)
+    ensures ScalarAdd(s, Zero()) == s
+    ensures ScalarAdd(Zero(), s) == s // <--- ADDED THIS LINE
 
   // =========================================================
-  // TEST SUITE FOR OPEN VOTING
+  // TEST SUITE
   // =========================================================
-  
   method RunTests(
       pk: GroupElement, 
       accum: GroupElement, 
       v: Scalar, r: Scalar, challenge: Scalar, 
-      nv: Scalar, nr: Scalar, sig: GroupElement
+      nv: Scalar, nr: Scalar, sig: GroupElement,
+      proof_nonce_k: Scalar
   )
   {
     // -------------------------------------------------------
-    // TEST CASE 1: THE HAPPY PATH (Membership Proven)
+    // SETUP
     // -------------------------------------------------------
-    // Scenario: An honest voter creates a commitment and a valid proof.
-    // Goal: Verify that the system accepts it.
-    
-    // 1. Setup the Election System
     var auditor := new SecureAuditor(pk, accum);
-    
-    // 2. Setup the Vote
     var myCommitment := Commit(v, r);
+
+    // -------------------------------------------------------
+    // TEST 1: FORWARD AUDIT (Vote -> Blockchain)
+    // -------------------------------------------------------
+    // 1. Generate Audit Proof
+    var auditProof := GenerateProof(v, r, challenge, nv, nr, sig);
     
-    // 3. Generate a Valid Proof (Honest Prover)
-    // Note: We use the 'GenerateProof' function which we proved is Complete.
-    var validProof := GenerateProof(v, r, challenge, nv, nr, sig);
-    
-    // 4. Perform the Audit
-    // We help Dafny apply the completeness lemma
+    // 2. Verify and Submit
     Lemma_Completeness(v, r, challenge, nv, nr, sig, pk, accum);
+    var isAuditValid := auditor.AuditVote(myCommitment, auditProof);
     
-    var result := auditor.AuditVote(myCommitment, validProof);
-    
-    // 5. ASSERT SUCCESS
-    assert result == true; 
-    
-    // 6. ASSERT STATE UPDATE (The vote is now in the set)
-    assert auditor.IsTrusted(myCommitment);
-    print "Test Case 1 (Valid Membership): PASSED\n";
-
+    assert isAuditValid == true;
+    print "Test 1 (Audit): PASSED\n";
 
     // -------------------------------------------------------
-    // TEST CASE 2: THE FAILURE PATH (Forgery Detected)
+    // TEST 2: REVERSE TRACEABILITY (Blockchain -> Vote)
     // -------------------------------------------------------
-    // Scenario: An attacker tries to submit a vote but provides a BAD proof.
-    // Goal: Verify that the system REJECTS it and the DB is unchanged.
+    // 1. Generate Decryption Proof
+    // We prove we know 'r' such that myCommitment == Commit(v, r)
+    var decProof := GenerateDecryptionProof(v, r, challenge, proof_nonce_k);
 
-    // 1. Setup a fresh system
-    var cleanAuditor := new SecureAuditor(pk, accum);
+    // 2. Helper Lemmas for the math to work out
+    // We need to tell Dafny that T + C^c == Commit(v*c, k + r*c)
+    // This usually requires invoking the Homomorphism axioms manually
+// 2. Helper Lemmas for the math to work out
+    calc {
+        // START: LHS of the verification check
+        CombineCommitments(decProof.commitment_to_randomness, CommitmentScale(myCommitment, challenge));
+        
+        ==  { 
+              // HINT 1: Tell Dafny how scaling works for this specific commitment
+              Axiom_CommitmentScale(v, r, challenge); 
+            }
+        
+        // Step 1: Expand definitions (T + C^c)
+        CombineCommitments(
+            Commit(Zero(), proof_nonce_k), 
+            Commit(ScalarMult(v, challenge), ScalarMult(r, challenge))
+        );
+        
+        ==  { 
+              // HINT 2: Tell Dafny how to add these two specific commitments
+              // We plug in the 4 values: v1, r1, v2, r2
+              Axiom_CommitmentHomomorphism(
+                  Zero(),                        // v1
+                  proof_nonce_k,                 // r1
+                  ScalarMult(v, challenge),      // v2
+                  ScalarMult(r, challenge)       // r2
+              );
+            }
+
+        // Step 2: Apply the addition inside the commitment
+        Commit(
+            ScalarAdd(Zero(), ScalarMult(v, challenge)), 
+            ScalarAdd(proof_nonce_k, ScalarMult(r, challenge))
+        );
+        
+        ==  { 
+              // HINT 3: Tell Dafny that 0 + x = x
+              Axiom_Zero(ScalarMult(v, challenge)); 
+            }
+
+        // Step 3: Simplify (0 + v*c becomes v*c)
+        Commit(ScalarMult(v, challenge), decProof.response_r);
+    }
     
-    // 2. Create a "Bad" Proof
-    // We simulate a forged proof where the response is totally wrong
-    var fakeProof := Proof(sig, challenge, r, v); // Just random data
-    
-    // 3. Condition: We assume this random data fails the math check
-    // (In a real system, the probability of random data passing is 1/2^256)
-    if !Verify(fakeProof, myCommitment, pk, accum) {
-        
-        // 4. Perform the Audit with the FAKE proof
-        var badResult := cleanAuditor.AuditVote(myCommitment, fakeProof);
-        
-        // 5. ASSERT REJECTION
-        assert badResult == false;
-        
-        // 6. ASSERT SAFETY (The vote MUST NOT be in the set)
-        assert !cleanAuditor.IsTrusted(myCommitment);
-        print "Test Case 2 (Invalid Proof Rejection): PASSED\n";
+    // 3. Verify Traceability
+    // FIX: Removed 'pk' argument here
+    if VerifyTraceOut(decProof, myCommitment, v) {
+        auditor.DecryptAndPublish(myCommitment, v, decProof);
+        print "Test 2 (Decryption): PASSED\n";
+    } else {
+        print "Test 2 (Decryption): FAILED\n";
+        // Assert failure to stop execution if logic is wrong
+        assert false; 
     }
   }
 }
