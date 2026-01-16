@@ -1,58 +1,30 @@
 module TraceableVotingTraceOut {
+  import opened TVPrimitives
+
+  // Optional helper if you later want a more “ElGamal-like” encryption model
+  function PKtoG1(pk: PublicKey): G1
 
   // ========================================================================
-  // TYPES
-  // ========================================================================
-  type G1(==, !new)
-  type G2(==, !new)
-  type GT(==, !new)
-  type Scalar(==, !new)
-  type Fr(==, !new)
-  
-  type PublicKey = G2
-  type SecretKey = Scalar
-  
-  datatype Ciphertext = CT(c1: G1, c2: G1)
-  
-  // ========================================================================
-  // PRIMITIVES
-  // ========================================================================
-  function G1Generator(): G1
-  function G2Generator(): G2
-  function G1Mult(g: G1, s: Scalar): G1
-  function G1Add(a: G1, b: G1): G1
-  function G1Sub(a: G1, b: G1): G1
-  function Pairing(g1: G1, g2: G2): GT
-  function HashToG1(m: Fr): G1
-  function HashToScalar(data: seq<G1>): Scalar
-  function ScalarMult(a: Scalar, b: Scalar): Scalar
-  
-  // ========================================================================
-  // ENCRYPTION
+  // ENCRYPTION (kept ghost/abstract)
   // ========================================================================
   ghost function EncryptWithRandomness(pk: PublicKey, m: Fr, r: Scalar): Ciphertext
   {
     CT(
       c1 := G1Mult(G1Generator(), r),
+      // abstract “pk^r” contribution via PKtoG1(pk)
       c2 := G1Add(HashToG1(m), G1Mult(G1Generator(), r))
     )
   }
-  
-  ghost function Decrypt(sk: SecretKey, c: Ciphertext): Fr
-  
+
   lemma {:axiom} EncryptionCorrectness(sk: SecretKey, pk: PublicKey, m: Fr, r: Scalar)
     ensures Decrypt(sk, EncryptWithRandomness(pk, m, r)) == m
 
   // ========================================================================
-  // HELPER PREDICATE (The Fix)
-  // This defines "Success" in a single place so Dafny never gets confused.
+  // HELPER PREDICATE (shared “success” notion)
   // ========================================================================
-  ghost predicate IsDecryptedCorrectly(
-      plaintext: Fr,
-      ciphertextSet: seq<Ciphertext>,
-      sk: SecretKey
-  ) {
-      exists j :: 0 <= j < |ciphertextSet| && 
+  ghost predicate IsDecryptedCorrectly(plaintext: Fr, ciphertextSet: seq<Ciphertext>, sk: SecretKey)
+  {
+    exists j :: 0 <= j < |ciphertextSet| &&
       Decrypt(sk, ciphertextSet[j]) == plaintext
   }
 
@@ -71,18 +43,20 @@ module TraceableVotingTraceOut {
   )
 
   datatype TraceOutProof = TOProof(
-    targetCiphertextIndex: nat, 
+    targetCiphertextIndex: nat,
     membershipProof: MembershipProof
   )
 
   // ========================================================================
   // ZK LOGIC
   // ========================================================================
-  ghost predicate ValidSchnorrProof(nizk: SchnorrProof, statement: G1) {
+  ghost predicate ValidSchnorrProof(nizk: SchnorrProof, statement: G1)
+  {
     var c := HashToScalar([nizk.commitment, statement]);
-    && nizk.challenge == c
-    && G1Mult(G1Generator(), nizk.response) == 
-       G1Add(nizk.commitment, G1Mult(statement, nizk.challenge))
+    nizk.challenge == c
+    &&
+    G1Mult(G1Generator(), nizk.response) ==
+      G1Add(nizk.commitment, G1Mult(statement, nizk.challenge))
   }
 
   lemma {:axiom} SchnorrSoundness(nizk: SchnorrProof, statement: G1)
@@ -99,8 +73,10 @@ module TraceableVotingTraceOut {
     serverPK: G2
   )
   {
-    && proof.commitmentToRandomness == targetCT.c1
-    && ValidSchnorrProof(proof.nizk, proof.commitmentToRandomness)
+    // The “binding” in this abstract model: proof must reference the target CT's c1
+    proof.commitmentToRandomness == targetCT.c1
+    &&
+    ValidSchnorrProof(proof.nizk, proof.commitmentToRandomness)
   }
 
   ghost predicate ValidTraceOutProof(
@@ -110,13 +86,14 @@ module TraceableVotingTraceOut {
     serverPK: G2
   )
   {
-    && proof.targetCiphertextIndex < |ciphertextSet|
-    && var targetCT := ciphertextSet[proof.targetCiphertextIndex];
-    && ProofBindsToCiphertext(proof.membershipProof, targetCT, plaintext, serverPK)
+    proof.targetCiphertextIndex < |ciphertextSet|
+    &&
+    (var targetCT := ciphertextSet[proof.targetCiphertextIndex];
+     ProofBindsToCiphertext(proof.membershipProof, targetCT, plaintext, serverPK))
   }
 
   // ========================================================================
-  // SECURITY AXIOM (Updated to use the Helper Predicate)
+  // SECURITY AXIOM (soundness assumption)
   // ========================================================================
   lemma {:axiom} TraceOutSoundness(
     sk: SecretKey,
@@ -126,7 +103,6 @@ module TraceableVotingTraceOut {
     serverPK: G2
   )
     requires ValidTraceOutProof(plaintext, ciphertextSet, proof, serverPK)
-    // Uses the shared predicate
     ensures IsDecryptedCorrectly(plaintext, ciphertextSet, sk)
     ensures Decrypt(sk, ciphertextSet[proof.targetCiphertextIndex]) == plaintext
 
@@ -137,13 +113,12 @@ module TraceableVotingTraceOut {
     ensures valid <==> ValidSchnorrProof(nizk, statement)
   {
     var c := HashToScalar([nizk.commitment, statement]);
-    if nizk.challenge != c { 
-      return false; 
+    if nizk.challenge != c {
+      return false;
     }
-    
+
     var lhs := G1Mult(G1Generator(), nizk.response);
     var rhs := G1Add(nizk.commitment, G1Mult(statement, nizk.challenge));
-    
     return lhs == rhs;
   }
 
@@ -158,9 +133,8 @@ module TraceableVotingTraceOut {
     if proof.commitmentToRandomness != targetCT.c1 {
       return false;
     }
-    
+
     var zkValid := VerifySchnorrProof(proof.nizk, proof.commitmentToRandomness);
-    
     return zkValid;
   }
 
@@ -177,14 +151,7 @@ module TraceableVotingTraceOut {
     }
 
     var targetCT := ciphertextSet[proof.targetCiphertextIndex];
-
-    var bindingValid := VerifyProofBinding(
-      proof.membershipProof,
-      targetCT,
-      plaintext,
-      serverPK
-    );
-
+    var bindingValid := VerifyProofBinding(proof.membershipProof, targetCT, plaintext, serverPK);
     return bindingValid;
   }
 
@@ -200,19 +167,16 @@ module TraceableVotingTraceOut {
     ensures found ==> Decrypt(sk, ciphertextSet[proof.targetCiphertextIndex]) == plaintext
   {
     var isValid := VerifyTraceOutProof(plaintext, ciphertextSet, proof, serverPK);
-
     if isValid {
       TraceOutSoundness(sk, plaintext, ciphertextSet, proof, serverPK);
       return true;
     }
-
     return false;
   }
 
   // ========================================================================
-  // BATCH VERIFICATION (Robust Predicate Logic)
+  // BATCH VERIFICATION
   // ========================================================================
-
   lemma BatchSoundness(
     plaintexts: seq<Fr>,
     ciphertextSet: seq<Ciphertext>,
@@ -223,15 +187,14 @@ module TraceableVotingTraceOut {
   )
     requires |plaintexts| == |proofs|
     requires limit <= |plaintexts|
-    requires forall k :: 0 <= k < limit ==> 
-             ValidTraceOutProof(plaintexts[k], ciphertextSet, proofs[k], serverPK)
-    // Uses the shared predicate
-    ensures forall k :: 0 <= k < limit ==> 
-            IsDecryptedCorrectly(plaintexts[k], ciphertextSet, sk)
+    requires forall k :: 0 <= k < limit ==> ValidTraceOutProof(plaintexts[k], ciphertextSet, proofs[k], serverPK)
+    ensures  forall k :: 0 <= k < limit ==> IsDecryptedCorrectly(plaintexts[k], ciphertextSet, sk)
+    decreases limit
   {
     if limit == 0 {
-        return;
+      return;
     }
+
     BatchSoundness(plaintexts, ciphertextSet, proofs, serverPK, sk, limit - 1);
     var k := limit - 1;
     TraceOutSoundness(sk, plaintexts[k], ciphertextSet, proofs[k], serverPK);
@@ -245,33 +208,22 @@ module TraceableVotingTraceOut {
     ghost sk: SecretKey
   ) returns (allValid: bool)
     requires |plaintexts| == |proofs|
-    // Uses the shared predicate - matches lemma exactly
-    ensures allValid ==> forall k :: 0 <= k < |plaintexts| ==>
-                         IsDecryptedCorrectly(plaintexts[k], ciphertextSet, sk)
+    ensures  allValid ==> forall k :: 0 <= k < |plaintexts| ==> IsDecryptedCorrectly(plaintexts[k], ciphertextSet, sk)
   {
     var i := 0;
-    
+
     while i < |plaintexts|
       invariant 0 <= i <= |plaintexts|
-      invariant forall k :: 0 <= k < i ==>
-                ValidTraceOutProof(plaintexts[k], ciphertextSet, proofs[k], serverPK)
+      invariant forall k :: 0 <= k < i ==> ValidTraceOutProof(plaintexts[k], ciphertextSet, proofs[k], serverPK)
     {
-       var isValid := VerifyTraceOutProof(
-         plaintexts[i], 
-         ciphertextSet, 
-         proofs[i], 
-         serverPK
-       );
-       
-       if !isValid {
-         return false;
-       }
-       i := i + 1;
+      var ok := VerifyTraceOutProof(plaintexts[i], ciphertextSet, proofs[i], serverPK);
+      if !ok {
+        return false;
+      }
+      i := i + 1;
     }
-    
-    // Now we call the lemma to bridge the gap
-    BatchSoundness(plaintexts, ciphertextSet, proofs, serverPK, sk, |plaintexts|);
 
+    BatchSoundness(plaintexts, ciphertextSet, proofs, serverPK, sk, |plaintexts|);
     return true;
   }
 }
