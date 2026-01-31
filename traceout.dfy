@@ -2,7 +2,7 @@ module TraceableVotingTraceOut {
   import opened TVPrimitives
 
   // Optional helper if you later want a more “ElGamal-like” encryption model
-  function PKtoG1(pk: PublicKey): G1
+  function PKtoG1(pk: PublicKey): G1 { pk }
 
   // ========================================================================
   // ENCRYPTION (kept ghost/abstract)
