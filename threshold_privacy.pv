@@ -1,0 +1,59 @@
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type part_dec.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_mix: channel [private]. (* Internal channel for the Mixnet *)
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+fun combine_pk(pkey, pkey, pkey): pkey.
+fun enc(vote, pkey, seed): bitstring.
+fun pdec(bitstring, skey): part_dec.
+
+(* Only works if all 3 are present *)
+reduc forall v: vote, sk1: skey, sk2: skey, sk3: skey, s: seed;
+      combine_dec(
+        enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s),
+        pdec(enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s), sk1),
+        pdec(enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s), sk2),
+        pdec(enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s), sk3)
+      ) = v.
+
+const V1, V2: vote.
+
+(* --- PROCESSES --- *)
+
+(* The Voter/BMD: Shuffles locally before sending to the Tally pool *)
+let processBMD(pk_combined: pkey) =
+    let vA = choice[V1, V2] in
+    let vB = choice[V2, V1] in
+    new s1: seed; new s2: seed;
+    let bA = enc(vA, pk_combined, s1) in
+    let bB = enc(vB, pk_combined, s2) in
+    (* Output as a shuffled batch to the tally pool *)
+    out(ch_mix, (bA, bB)).
+
+(* The Tally Phase: Admins only decrypt the shuffled batch *)
+let processTally(sk1: skey, sk2: skey, sk3: skey, pk_combined: pkey) =
+    in(ch_mix, (ballotA: bitstring, ballotB: bitstring));
+    
+    (* Even if the attacker knows sk1 and sk2, 
+       they need the pdec from the honest sk3 for BOTH ballots. *)
+    let pdecA3 = pdec(ballotA, sk3) in
+    let pdecB3 = pdec(ballotB, sk3) in
+    
+    (* The honest admin publishes their partial decryptions for the whole batch *)
+    out(ch_public, (pdecA3, pdecB3)).
+
+process
+    new sk1: skey; new sk2: skey; new sk3: skey;
+    let pk_combined = combine_pk(pk(sk1), pk(sk2), pk(sk3)) in
+    
+    (* Attacker knows sk1 and sk2 (n-1 corruption) *)
+    out(ch_public, sk1);
+    out(ch_public, sk2);
+    out(ch_public, pk_combined);
+
+    ( processBMD(pk_combined) | processTally(sk1, sk2, sk3, pk_combined) )

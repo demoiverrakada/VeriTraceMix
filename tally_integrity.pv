@@ -1,0 +1,79 @@
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type device_id.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_usb: channel [private]. 
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+fun enc(vote, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+fun hw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
+
+(* --- CONSTANTS & EVENTS --- *)
+const V1, V2: vote.
+const Dev1: device_id.
+
+event VoterCasts(vote).
+event AdminPublished(vote).
+
+(* --- QUERIES --- *)
+
+(* 1. INTEGRITY: Every vote published in the final tally must 
+   have been cast by a voter on a legitimate BMD. *)
+query v: vote; event(AdminPublished(v)) ==> event(VoterCasts(v)).
+
+(* 2. CORRECTNESS: If the Admin publishes a result, it must match 
+   the contents of the hardware-signed data. *)
+(* (Verified by the signature and decryption logic below) *)
+
+(* --- PROCESSES --- *)
+
+(* The BMD Hardware *)
+let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey) =
+    (* BMD records two votes (simulating a batch) *)
+    event VoterCasts(V1);
+    new s1: seed; let b1 = enc(V1, pk_elect, s1) in
+    
+    event VoterCasts(V2);
+    new s2: seed; let b2 = enc(V2, pk_elect, s2) in
+    
+    let usb_data = (b1, b2) in
+    let seal = hw_sign((id, usb_data), sk_tpm) in
+    out(ch_usb, (id, usb_data, seal)).
+
+(* The Admin (Tallying Authority) *)
+let processAdmin(pk_tpm_auth: pkey, sk_elect: skey) =
+    in(ch_usb, (id: device_id, data: bitstring, seal: bitstring));
+    
+    (* Check provenance: only proceed if signature is valid *)
+    if check_hw(seal, pk_tpm_auth) = (id, data) then
+    (
+        let (ballot1: bitstring, ballot2: bitstring) = data in
+        
+        (* Decrypt ballots *)
+        let res1 = dec(ballot1, sk_elect) in
+        let res2 = dec(ballot2, sk_elect) in
+        
+        (* Publish final tally results *)
+        event AdminPublished(res1);
+        event AdminPublished(res2);
+        out(ch_public, (res1, res2))
+    ).
+
+(* --- MAIN SYSTEM --- *)
+process
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    new sk_tpm: skey;   let pk_tpm = pk(sk_tpm) in
+    
+    (* Note: In the Tallying phase, the Admin is the only one 
+       who can access the private channel ch_usb. *)
+    (
+        processBMD(Dev1, sk_tpm, pk_elect) | 
+        processAdmin(pk_tpm, sk_elect)
+    )

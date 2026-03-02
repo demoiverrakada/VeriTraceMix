@@ -1,0 +1,92 @@
+(* --- TYPES --- *)
+type skey. type pkey. type cred. type vote_t. 
+type seed. type null_t. type election_id.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+(* 1. Voter Credentials (RA Signs Voter's Public Key) *)
+fun issue_cred(skey, pkey): cred.
+reduc forall sk_ra: skey, pk_v: pkey; 
+      check_cred(issue_cred(sk_ra, pk_v), pk(sk_ra)) = pk_v.
+
+(* 2. Anonymous Set Membership (ZKP) *)
+(* Note: We bind the proof to the ballot to prevent re-injection *)
+fun prove_membership(skey, cred, bitstring): bitstring.
+reduc forall sk_v: skey, sk_ra: skey, ballot: bitstring;
+      verify_membership(prove_membership(sk_v, issue_cred(sk_ra, pk(sk_v)), ballot), pk(sk_ra), ballot) = true.
+
+(* 3. Nullifiers (Deterministic and secret-dependent) *)
+fun gen_null(skey, election_id): null_t.
+
+(* 4. Encryption for the Ballot *)
+fun enc(vote_t, pkey, seed): bitstring.
+
+(* --- CONSTANTS & EVENTS --- *)
+const CandidateA, CandidateB: vote_t.
+const MyElection: election_id.
+
+event Registered(pkey).
+event BallotAccepted(null_t).
+event VoterStarted(pkey).
+
+(* Table for Double-Voting Prevention *)
+table NullifierRepo(null_t).
+
+(* --- QUERIES --- *)
+
+(* 1. Eligibility: If a ballot is accepted, was it cast by a registered voter? *)
+(* ProVerif does not support "exists" in queries; we check: accepted ballot implies some key was registered *)
+query n: null_t, pk_v: pkey; event(BallotAccepted(n)) ==> event(Registered(pk_v)).
+
+(* 2. Double-Voting: Can a single voter get two ballots accepted? (injective correspondence) *)
+query n: null_t, pk_v: pkey; inj-event(BallotAccepted(n)) ==> inj-event(VoterStarted(pk_v)).
+
+(* --- PROCESSES --- *)
+
+(* The Voter *)
+let processVoter(sk_v: skey, v_cred: cred, pk_ra: pkey, pk_elect: pkey, my_vote: vote_t) =
+    event VoterStarted(pk(sk_v));
+    new s: seed;
+    let ballot = enc(my_vote, pk_elect, s) in
+    let n = gen_null(sk_v, MyElection) in
+    (* We bind the membership proof to the encrypted ballot *)
+    let pi = prove_membership(sk_v, v_cred, ballot) in
+    out(ch_public, (ballot, pi, n)).
+
+(* The Bulletin Board (Eligibility & Nullifier Check) *)
+let processBB(pk_ra: pkey) =
+    in(ch_public, (ballot: bitstring, pi_in: bitstring, n: null_t));
+    
+    (* Check: Is this a registered voter? (Set Membership) *)
+    if verify_membership(pi_in, pk_ra, ballot) = true then
+    
+    (* Check: Has this nullifier been used? (Reverse Set Membership) *)
+    get NullifierRepo(=n) in 0 else
+    (
+        insert NullifierRepo(n);
+        event BallotAccepted(n);
+        out(ch_public, (ballot, n))
+    ).
+
+(* --- MAIN SYSTEM --- *)
+process
+    (* Setup Keys *)
+    new sk_ra: skey; let pk_ra = pk(sk_ra) in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    out(ch_public, (pk_ra, pk_elect));
+
+    (* Register Voter 1 *)
+    new sk_v1: skey; 
+    let cred1 = issue_cred(sk_ra, pk(sk_v1)) in
+    event Registered(pk(sk_v1));
+
+    (* Execution: Voter 1 tries to vote twice *)
+    (
+        processVoter(sk_v1, cred1, pk_ra, pk_elect, CandidateA) |
+        processVoter(sk_v1, cred1, pk_ra, pk_elect, CandidateB) |
+        (!processBB(pk_ra))
+    )

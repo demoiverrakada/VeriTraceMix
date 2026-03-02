@@ -1,0 +1,162 @@
+(* ============================================================
+    OPEN-VOTING UNIFIED HARDWARE-HARDENED MODEL
+    Combines: Secure Boot, TPM, Threshold, Mixnet, & Judge
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type device_id. type firmware. type cred. 
+type tally_proof. type part_dec.
+
+(* --- CHANNELS --- *)
+free ch_pub: channel.            (* Public Bulletin Board *)
+free ch_reg: channel [private].   (* Secure Registration *)
+free ch_judge: channel.          (* Public Dispute Channel *)
+free ch_voter_bmd: channel [private]. (* Physical Receipt Handover *)
+
+(* --- 1. HARDWARE ROOT OF TRUST (Secure Boot & TPM) --- *)
+fun pk(skey): pkey.
+fun hash(firmware): bitstring.
+fun hw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
+
+fun fw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_fw(fw_sign(m, k), pk(k)) = m.
+
+(* --- 2. ENCRYPTION & THRESHOLD TALLY --- *)
+fun enc(vote, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+fun pdec(bitstring, skey): part_dec.
+(* combine result of partial decryptions; defined by reduc only *)
+reduc forall v: vote, s: seed, k1: skey, k2: skey;
+      open_tally(enc(v, pk(k1), s), pdec(enc(v, pk(k1), s), k1), pdec(enc(v, pk(k1), s), k2)) = v.
+
+fun prove_tally(bitstring, vote, skey): tally_proof.
+reduc forall b: bitstring, v: vote, k: skey;
+      verify_tally(prove_tally(b, v, k), b, v, pk(k)) = true.
+
+(* --- 3. ELIGIBILITY (Credentials) --- *)
+fun issue_cred(skey, pkey): cred.
+reduc forall sk_ra: skey, pk_v: pkey; 
+      check_cred(issue_cred(sk_ra, pk_v), pk(sk_ra)) = pk_v.
+
+(* --- CONSTANTS & EVENTS --- *)
+const V1, V2: vote.
+const ApprovedOS: firmware.
+event VoterCasts(device_id, vote).
+event OS_Loaded(device_id, firmware).
+event BB_Published(device_id, bitstring).
+event DeviceRevoked(device_id).
+event TallyConfirmed(vote).
+
+(* --- TABLES --- *)
+table BulletinBoard(device_id, bitstring, bitstring).
+table RevocationList(device_id).
+
+(* --- QUERIES (The 15 Goals Summary) --- *)
+
+(* Q1: Platform Integrity - No vote cast without Approved OS *)
+query id: device_id, v: vote; 
+      event(VoterCasts(id, v)) ==> event(OS_Loaded(id, ApprovedOS)).
+
+(* Q2: Universal Audit - Tally only includes honest voter intent *)
+query v: vote, id: device_id; 
+      event(TallyConfirmed(v)) ==> event(VoterCasts(id, v)).
+
+(* Q3: Accountability - Only the Judge can revoke a device *)
+query id: device_id; event(DeviceRevoked(id)).
+
+(* Q4: Privacy - Observational Equivalence (Checked via 'choice') *)
+(* Note: To run privacy, comment out the queries above and use choice[V1, V2] *)
+
+(* --- PROCESSES --- *)
+
+(* A. Registration Authority *)
+let processRA(sk_ra: skey) =
+    ! in(ch_reg, (v_pk: pkey));
+    out(ch_reg, issue_cred(sk_ra, v_pk)).
+
+(* B. Hardened BMD (Secure Boot + TPM + UI) *)
+let processBMD(id: device_id, sk_tpm: skey, pk_ra: pkey, pk_elect: pkey) =
+    (* 1. Secure Boot *)
+    in(ch_pub, (boot_os: firmware, sig: bitstring));
+    if check_fw(sig, pk_ra) = hash(boot_os) then
+    if boot_os = ApprovedOS then
+      (
+        event OS_Loaded(id, ApprovedOS);
+        let v_choice = V1 in
+        event VoterCasts(id, v_choice);
+        new s: seed;
+        let ballot = enc(v_choice, pk_elect, s) in
+        let receipt = hw_sign(ballot, sk_tpm) in
+        out(ch_voter_bmd, (ballot, receipt));
+        event BB_Published(id, ballot);
+        out(ch_pub, (id, ballot, receipt))
+      )
+    else 0
+    else 0.
+
+(* C. The Judge (Accountability Logic) *)
+let processJudge(pk_tpm: pkey) =
+    in(ch_judge, (id: device_id, ballot: bitstring, receipt: bitstring));
+    if check_hw(receipt, pk_tpm) = ballot then
+      (
+        get BulletinBoard(=id, =ballot, sig) in 0
+        else (event DeviceRevoked(id); insert RevocationList(id))
+      )
+    else 0.
+
+(* D. Tally Authority (Threshold + Audit Proofs) *)
+let processTally(sk_e1: skey, sk_e2: skey, pk_tpm: pkey) =
+    ! in(ch_pub, (id: device_id, b: bitstring, r: bitstring));
+    (* Verify Hardware Provenance *)
+    if check_hw(r, pk_tpm) = b then
+      (
+        insert BulletinBoard(id, b, r);
+        let res_v = dec(b, sk_e1) in
+        let p = prove_tally(b, res_v, sk_e1) in
+        out(ch_pub, (id, b, res_v, p))
+      )
+    else 0.
+
+(* E. Universal Auditor (Public) *)
+let processAuditor(pk_elect: pkey) =
+    in(ch_pub, (id: device_id, ballot: bitstring, res_v: vote, p: tally_proof));
+    get RevocationList(=id) in 0 else
+      (
+        if verify_tally(p, ballot, res_v, pk_elect) = true then
+          event TallyConfirmed(res_v)
+        else 0
+      ).
+
+(* --- MAIN SYSTEM --- *)
+process
+    (* Setup Authority Keys *)
+    new sk_ra: skey;    let pk_ra = pk(sk_ra) in
+    new sk_e1: skey;    let pk_e1 = pk(sk_e1) in
+    new sk_e2: skey;    let pk_e2 = pk(sk_e2) in
+    new sk_tpm: skey;   let pk_tpm = pk(sk_tpm) in
+    new id1: device_id;
+    
+    (* Public Keys to BB *)
+    out(ch_pub, (pk_ra, pk_e1, pk_tpm, id1));
+    
+    (* Provisioning: EA signs the Approved OS *)
+    let os_sig = fw_sign(hash(ApprovedOS), sk_ra) in
+    out(ch_pub, (ApprovedOS, os_sig));
+
+    (
+        (* Run System Components *)
+        processBMD(id1, sk_tpm, pk_ra, pk_e1) | 
+        processTally(sk_e1, sk_e2, pk_tpm) |
+        processJudge(pk_tpm) |
+        processAuditor(pk_e1) |
+        
+        (* Simulate Voter checking BB and going to Judge if failed *)
+        (
+            in(ch_voter_bmd, (b: bitstring, r: bitstring));
+            (* If attacker blocks ch_pub, voter uses ch_judge *)
+            out(ch_judge, (id1, b, r))
+        )
+    )

@@ -1,0 +1,59 @@
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type voter_id. type device_id.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_usb: channel [private]. 
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+fun enc(vote, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+fun hw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
+
+(* --- CONSTANTS --- *)
+const V1, V2: vote.
+
+(* --- PROCESSES --- *)
+
+let processBMD(sk_tpm: skey, pk_elect: pkey) =
+    (* BMD takes two inputs *)
+    let voteA = choice[V1, V2] in
+    let voteB = choice[V2, V1] in
+
+    new s1: seed; let bA = enc(voteA, pk_elect, s1) in
+    new s2: seed; let bB = enc(voteB, pk_elect, s2) in
+
+    (* 
+       THE FIX: SHUFFLING.
+       In Universe 1, we write (bA, bB).
+       In Universe 2, we write (bB, bA).
+       This ensures the 'first' ballot in the USB isn't always Voter A.
+    *)
+    let usb_content = choice[(bA, bB), (bB, bA)] in
+    
+    let seal = hw_sign(usb_content, sk_tpm) in
+    out(ch_usb, (usb_content, seal)).
+
+let processAdmin(sk_elect: skey, pk_tpm: pkey) =
+    in(ch_usb, (data: bitstring, seal: bitstring));
+    
+    if check_hw(seal, pk_tpm) = data then
+    let (ballot1: bitstring, ballot2: bitstring) = data in
+    
+    let res1 = dec(ballot1, sk_elect) in
+    let res2 = dec(ballot2, sk_elect) in
+    
+    (* Output the results *)
+    out(ch_public, res1);
+    out(ch_public, res2).
+
+process
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    new sk_tpm: skey;   let pk_tpm = pk(sk_tpm) in
+    out(ch_public, (pk_elect, pk_tpm));
+
+    ( processBMD(sk_tpm, pk_elect) | processAdmin(sk_elect, pk_tpm) )

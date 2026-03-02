@@ -1,0 +1,76 @@
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type device_id.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_usb_physical: channel.
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+fun enc(vote, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+fun hw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
+
+(* --- CONSTANTS & EVENTS --- *)
+const V1, V2: vote.
+const Dev1: device_id.
+
+event BMD_Signed_USB(device_id, bitstring).
+event Admin_Accepted_USB(device_id, bitstring).
+
+(* --- QUERIES --- *)
+
+(* 1. PROVENANCE: Does the accepted data match what the specific BMD signed? *)
+query d: bitstring; 
+      event(Admin_Accepted_USB(Dev1, d)) ==> event(BMD_Signed_USB(Dev1, d)).
+
+(* 2. AUTHENTICITY: Can an attacker make the Admin accept a fake/unregistered device? *)
+(* This should be TRUE (No trace found) because sk_attacker_dev is not pk_tpm *)
+query d: bitstring, fake_id: device_id;
+      event(Admin_Accepted_USB(fake_id, d)) ==> (fake_id = Dev1).
+
+(* --- PROCESSES --- *)
+
+let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey) =
+    new s1: seed; let b1 = enc(V1, pk_elect, s1) in
+    new s2: seed; let b2 = enc(V2, pk_elect, s2) in
+    let usb_data = (b1, b2) in
+    
+    (* FIXED: Sign (ID + DATA) to bind the identity to the payload *)
+    let seal = hw_sign((id, usb_data), sk_tpm) in
+    event BMD_Signed_USB(id, usb_data);
+    out(ch_usb_physical, (id, usb_data, seal)).
+
+let processAdmin(pk_tpm_auth: pkey, sk_elect: skey) =
+    in(ch_usb_physical, (id: device_id, data: bitstring, seal: bitstring));
+    
+    (* Verify signature against the payload (ID + DATA) *)
+    if check_hw(seal, pk_tpm_auth) = (id, data) then
+      (
+        event Admin_Accepted_USB(id, data);
+        let (ballot1: bitstring, ballot2: bitstring) = data in
+        out(ch_public, (dec(ballot1, sk_elect), dec(ballot2, sk_elect)))
+      )
+    else 0.
+
+process
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    new sk_tpm: skey;   let pk_tpm = pk(sk_tpm) in
+    
+    (* Attacker's fake hardware *)
+    new sk_attacker_dev: skey; 
+    new attacker_id: device_id;
+
+    (
+        processBMD(Dev1, sk_tpm, pk_elect) | 
+        processAdmin(pk_tpm, sk_elect) |
+        
+        (* Attacker attempts to inject a fake signed USB *)
+        ( new s: seed; new s2: seed;
+          let fake_data = (enc(V1, pk_elect, s), enc(V2, pk_elect, s2)) in
+          out(ch_usb_physical, (attacker_id, fake_data, hw_sign((attacker_id, fake_data), sk_attacker_dev))) )
+    )

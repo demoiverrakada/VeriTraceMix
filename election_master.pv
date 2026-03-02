@@ -1,0 +1,106 @@
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type device_id. type firmware.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_usb: channel [private]. (* Physical/Encrypted USB Transport *)
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+(* 1. Encryption *)
+fun enc(vote, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+(* 2. Hardware Signatures (Root of Trust) *)
+fun hw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
+
+(* 3. Firmware/OS Integrity (Secure Boot) *)
+fun hash(firmware): bitstring.
+fun fw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_fw(fw_sign(m, k), pk(k)) = m.
+
+(* --- CONSTANTS & EVENTS --- *)
+const V1, V2: vote.
+const ApprovedOS: firmware.
+const Dev1: device_id.
+
+event OS_Loaded(device_id, firmware).
+event VoterCasts(vote).
+event AdminPublished(vote).
+
+(* Free name for TPM key so Q1 can reference it (cannot use 'new' in query terms) *)
+free sk_tpm: skey [private].
+
+(* --- QUERIES --- *)
+
+(* Q1: Secrecy - Can the attacker steal the non-extractable TPM key? *)
+query attacker(sk_tpm).
+
+(* Q2: Integrity - Does the tally match voter intent? *)
+query v: vote; event(AdminPublished(v)) ==> event(VoterCasts(v)).
+
+(* Q3: Platform Integrity - Can a vote be published if the OS was tampered with? *)
+query v: vote; event(AdminPublished(v)) ==> event(OS_Loaded(Dev1, ApprovedOS)).
+
+(* Note: Privacy (choice) is checked via Observational Equivalence mode *)
+
+(* --- PROCESSES --- *)
+
+(* The Election Authority *)
+let processEA(sk_ra: skey) =
+    let fw_sig = fw_sign(hash(ApprovedOS), sk_ra) in
+    out(ch_public, (ApprovedOS, fw_sig)).
+
+(* The BMD Hardware *)
+let processBMD(id: device_id, sk_tpm: skey, pk_ra: pkey, pk_elect: pkey) =
+    (* 1. Secure Boot Phase *)
+    in(ch_public, (boot_os: firmware, sig: bitstring));
+    if check_fw(sig, pk_ra) = hash(boot_os) then
+    if boot_os = ApprovedOS then
+      (
+        event OS_Loaded(id, ApprovedOS);
+        (* 2. Voting Phase (fixed votes; use choice[V1,V2]/choice[V2,V1] for observational-equivalence privacy check) *)
+        let voteA = V1 in
+        let voteB = V2 in
+        event VoterCasts(voteA);
+        event VoterCasts(voteB);
+        new s1: seed; let bA = enc(voteA, pk_elect, s1) in
+        new s2: seed; let bB = enc(voteB, pk_elect, s2) in
+        (* 3. Shuffling and Sealing *)
+        let usb_content = (bA, bB) in
+        let seal = hw_sign((id, usb_content), sk_tpm) in
+        (* 4. Transport *)
+        out(ch_usb, (id, usb_content, seal))
+      )
+    else 0
+    else 0.
+
+(* The Admin (Tallying Authority) *)
+let processAdmin(pk_tpm_auth: pkey, sk_elect: skey) =
+    in(ch_usb, (id: device_id, data: bitstring, seal: bitstring));
+    
+    (* Check provenance and integrity *)
+    if check_hw(seal, pk_tpm_auth) = (id, data) then
+      (
+        let (ballot1: bitstring, ballot2: bitstring) = data in
+        let res1 = dec(ballot1, sk_elect) in
+        let res2 = dec(ballot2, sk_elect) in
+        event AdminPublished(res1);
+        event AdminPublished(res2);
+        out(ch_public, (res1, res2))
+      )
+    else 0.
+
+(* --- MAIN SYSTEM --- *)
+process
+    new sk_ra: skey;    let pk_ra = pk(sk_ra) in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    let pk_tpm = pk(sk_tpm) in
+    out(ch_public, (pk_ra, pk_elect, pk_tpm));
+
+    ( processEA(sk_ra) | 
+      processBMD(Dev1, sk_tpm, pk_ra, pk_elect) | 
+      processAdmin(pk_tpm, sk_elect) )

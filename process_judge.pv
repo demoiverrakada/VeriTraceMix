@@ -1,0 +1,80 @@
+(* --- TYPES --- *)
+type device_id. type skey. type pkey. type vote. type seed.
+
+(* --- CHANNELS --- *)
+free ch_judge: channel.          (* Public channel to submit disputes *)
+free ch_voter_bmd: channel [private]. (* Physical/Local connection for receipt *)
+free ch_pub: channel.            (* Bulletin board *)
+free ch_ui: channel.             (* Voter-BMD UI *)
+
+(* --- CRYPTO --- *)
+fun pk(skey): pkey.
+fun enc(vote, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+(* A receipt is a TPM signature of the Ballot and a unique Session ID *)
+fun sign_receipt(bitstring, bitstring, skey): bitstring.
+reduc forall b: bitstring, s: bitstring, k: skey;
+      verify_receipt(sign_receipt(b, s, k), pk(k)) = (b, s).
+
+(* --- EVENTS FOR THE JUDGE --- *)
+event DisputeStarted(device_id).
+event JudgeRulesAgainstAdmin(device_id).
+event BallotConfirmedOnBB(bitstring).
+event BB_Published(bitstring, device_id).
+
+(* --- QUERY: DISPUTE SOUNDNESS --- *)
+(* When Judge rules against Admin, a dispute was started (ballot not found on BB) *)
+query id: device_id; event(JudgeRulesAgainstAdmin(id)) ==> event(DisputeStarted(id)).
+
+(* --- THE JUDGE PROCESS --- *)
+let processJudge(pk_tpm: pkey) =
+    (* 1. Judge receives a claim from a Voter *)
+    in(ch_judge, (id: device_id, ballot: bitstring, session_id: bitstring, receipt: bitstring));
+    
+    (* 2. Verify the Receipt is authentic (came from an authorized BMD) *)
+    let (r_ballot: bitstring, r_session: bitstring) = verify_receipt(receipt, pk_tpm) in
+    if r_ballot = ballot then
+      (
+        event DisputeStarted(id);
+        (* 3. Check the Bulletin Board (Judge receives one published ballot to compare) *)
+        in(ch_pub, published_ballot: bitstring);
+        if published_ballot = ballot then
+          event BallotConfirmedOnBB(ballot)
+        else
+          (* If the ballot cannot be found on the BB, the Judge rules against the Admin *)
+          event JudgeRulesAgainstAdmin(id)
+      )
+    else 0.
+
+(* --- UPDATED BMD PROCESS (To include Receipt) --- *)
+let processBMD_with_Receipt(id: device_id, sk_tpm: skey, pk_elect: pkey) =
+    in(ch_ui, v: vote);
+    new session_id: bitstring;
+    new s: seed;
+    
+    let ballot = enc(v, pk_elect, s) in
+    
+    (* The BMD produces the Receipt for the Voter locally *)
+    let receipt = sign_receipt(ballot, session_id, sk_tpm) in
+    out(ch_voter_bmd, (ballot, session_id, receipt)); 
+    
+    (* The BMD sends the ballot to the Admin/BB *)
+    event BB_Published(ballot, id);
+    out(ch_pub, (id, ballot)).
+
+(* --- THE DISPUTING VOTER --- *)
+let processVoter(id: device_id) =
+    (* Voter gets their receipt from the BMD *)
+    in(ch_voter_bmd, (ballot: bitstring, sess: bitstring, receipt: bitstring));
+    (* Voter submits dispute to Judge *)
+    out(ch_judge, (id, ballot, sess, receipt)).
+
+(* --- MAIN SYSTEM --- *)
+process
+    new sk_tpm: skey; let pk_tpm = pk(sk_tpm) in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    new dev1: device_id;
+    ( processJudge(pk_tpm) |
+      processBMD_with_Receipt(dev1, sk_tpm, pk_elect) |
+      processVoter(dev1) )

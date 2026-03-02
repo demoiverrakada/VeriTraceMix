@@ -1,0 +1,76 @@
+(* --- TYPES --- *)
+type skey.      (* Private Keys *)
+type pkey.      (* Public Keys *)
+type cred.      (* Credentials/Signatures *)
+type id.        (* Voter IDs *)
+
+(* --- CHANNELS --- *)
+free ch_pub: channel.               (* Public Internet/BB *)
+free ch_reg: channel [private].     (* Secure Registration Channel *)
+
+(* --- CRYPTO PRIMITIVES --- *)
+
+(* Asymmetric Key Logic *)
+fun pk(skey): pkey.
+
+(* Digital Signatures for Membership *)
+fun sign(skey, pkey): cred.
+reduc forall sk: skey, k: pkey; checksign(sign(sk, k), pk(sk)) = k.
+
+(* --- EVENTS --- *)
+event Registered(id, pkey).
+event AuthStarted().
+event ElectionInitialized(pkey, pkey). (* RA Key, Election Key *)
+
+(* Free names for keys so queries can reference them before process *)
+free sk_ra: skey [private].
+free sk_elect: skey [private].
+free test_pk: pkey.
+
+(* --- QUERIES --- *)
+query attacker(sk_ra).
+query attacker(sk_elect).
+query v_id: id, v_pk: pkey; event(Registered(v_id, v_pk)) ==> event(AuthStarted()).
+query attacker(sign(sk_ra, test_pk)).
+
+(* --- PROCESSES --- *)
+
+(* The Registration Authority *)
+let processRA(sk_ra: skey) =
+    event AuthStarted();
+    (* Listen for registration requests from voters *)
+    ! in(ch_reg, (v_id: id, v_pk: pkey));
+    let credential = sign(sk_ra, v_pk) in
+    event Registered(v_id, v_pk);
+    out(ch_reg, credential).
+
+(* The Voter (Setup Phase) *)
+let processVoterSetup(v_id: id, pk_ra: pkey) =
+    new sk_v: skey;
+    let v_pk = pk(sk_v) in
+    (* Send identity and public key to RA over secure channel *)
+    out(ch_reg, (v_id, v_pk));
+    (* Receive the Membership Credential *)
+    in(ch_reg, v_cred: cred);
+    (* Verify the credential is for my own key *)
+    if checksign(v_cred, pk_ra) = v_pk then
+      out(ch_pub, (v_pk, v_cred))
+    else
+      0.
+
+(* --- MAIN SYSTEM --- *)
+process
+    (* 1. RA Key and Election Key (using free names for query compatibility) *)
+    let pk_ra = pk(sk_ra) in
+    let pk_elect = pk(sk_elect) in
+    
+    (* 3. Announce Public Keys on Bulletin Board *)
+    out(ch_pub, pk_ra);
+    out(ch_pub, pk_elect);
+    event ElectionInitialized(pk_ra, pk_elect);
+
+    (* 4. Parallel execution of Authority and multiple Voters *)
+    ( 
+        processRA(sk_ra) | 
+        (! new v_id: id; processVoterSetup(v_id, pk_ra)) 
+    )

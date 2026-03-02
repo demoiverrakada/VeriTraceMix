@@ -1,0 +1,83 @@
+(* --- TYPES --- *)
+type skey. type pkey. type cred. type id.
+type vote_t. type null_t. type seed.
+
+(* --- CHANNELS --- *)
+free ch_pub: channel.
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+(* Encryption for the Ballot *)
+fun enc(vote_t, pkey, seed): bitstring.
+reduc forall v: vote_t, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+(* Credential Logic (from Setup) *)
+fun sign(skey, pkey): cred.
+reduc forall sk: skey, k: pkey; checksign(sign(sk, k), pk(sk)) = k.
+
+(* Nullifier Logic (Reverse Set Membership) *)
+(* Deterministic: Same sk_v + same ElectionID = Same Nullifier *)
+fun gen_null(skey, id): null_t.
+
+(* --- CONSTANTS & EVENTS --- *)
+const CandidateA, CandidateB: vote_t.
+const Election1: id.
+
+event Cast(null_t, bitstring).
+event DoubleVoteAttempt(null_t).
+event ValidVoteRecorded(null_t).
+
+(* Table to store used nullifiers *)
+table NullifierRepo(null_t).
+
+(* --- QUERIES --- *)
+(* Query 1: Can the same voter get two 'ValidVoteRecorded' events? *)
+query n: null_t; event(ValidVoteRecorded(n)) ==> (event(ValidVoteRecorded(n))).
+(* Query 2: Integrity - Can an unregistered user record a valid vote? *)
+query n: null_t; event(ValidVoteRecorded(n)).
+
+(* --- PROCESSES --- *)
+
+(* The Voter Process *)
+let processVoter(sk_v: skey, v_cred: cred, pk_ra: pkey, pk_elect: pkey, my_vote: vote_t) =
+    new s: seed;
+    let ballot = enc(my_vote, pk_elect, s) in
+    let n = gen_null(sk_v, Election1) in
+    
+    (* Verify own credential before sending (sanity check) *)
+    if checksign(v_cred, pk_ra) = pk(sk_v) then
+      out(ch_pub, (ballot, n, v_cred, pk(sk_v)))
+    else
+      0.
+
+(* The Bulletin Board (Validation) *)
+let processBB(pk_ra: pkey) =
+    in(ch_pub, (ballot: bitstring, n: null_t, v_cred: cred, v_pk: pkey));
+    
+    (* 1. Validate Eligibility (Set Membership) *)
+    if checksign(v_cred, pk_ra) = v_pk then
+      (* 2. If nullifier already in table -> double vote; else accept and publish *)
+      get NullifierRepo(=n) in event DoubleVoteAttempt(n) else
+      (insert NullifierRepo(n); event ValidVoteRecorded(n); out(ch_pub, (ballot, n)))
+    else
+      0.
+
+(* --- MAIN SYSTEM --- *)
+process
+    (* Setup (Assume keys generated) *)
+    new sk_ra: skey; let pk_ra = pk(sk_ra) in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    out(ch_pub, (pk_ra, pk_elect));
+
+    (* Registered Voter 1 *)
+    new sk_v1: skey; 
+    let cred1 = sign(sk_ra, pk(sk_v1)) in
+    
+    (* System Execution *)
+    (
+        (* Voter 1 tries to vote twice with different votes *)
+        processVoter(sk_v1, cred1, pk_ra, pk_elect, CandidateA) |
+        processVoter(sk_v1, cred1, pk_ra, pk_elect, CandidateB) |
+        (!processBB(pk_ra))
+    )

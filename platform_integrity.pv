@@ -1,0 +1,92 @@
+(* --- TYPES --- *)
+type skey.      (* Private Keys *)
+type pkey.      (* Public Keys *)
+type firmware.  (* Operating System / Election Logic *)
+type device_id. (* BMD Serial Number *)
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_tpm: channel [private]. (* Internal bus between OS and TPM *)
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+(* Digital Signatures (ECDSA/RSA as mentioned in doc) *)
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; checksign(sign(m, k), pk(k)) = m.
+
+(* SHA-256 Merkle Tree / dm-verity representation *)
+(* We model this as a hash of the firmware package *)
+fun hash(firmware): bitstring.
+
+(* --- CONSTANTS & identity --- *)
+const ApprovedOS: firmware.    (* The legitimate, signed OS *)
+const TamperedOS: firmware.    (* Any modified or malicious OS *)
+const BootSuccess: bitstring.
+
+(* --- EVENTS --- *)
+event OS_Loaded(device_id, firmware).
+event TPM_Key_Unlocked(device_id).
+event BallotSigned(bitstring, device_id).
+
+(* Free names for device and TPM key so queries can reference them before process *)
+free dev1: device_id.
+free sk_tpm1: skey [private].
+
+(* --- QUERIES --- *)
+(* 1. Secrecy of the TPM Key: Can the attacker extract the non-extractable key? *)
+query attacker(sk_tpm1).
+(* 2. Integrity: Can a ballot be signed if the OS loaded was not ApprovedOS? *)
+query b: bitstring; event(BallotSigned(b, dev1)) ==> event(OS_Loaded(dev1, ApprovedOS)).
+(* 3. Counterfeit: Can an attacker sign a ballot if they don't have the hardware sk_tpm1? *)
+query b: bitstring; attacker(sign(b, sk_tpm1)).
+
+(* --- PROCESSES --- *)
+
+(* The Election Authority (EA) - Provisions the BMD *)
+let processEA(sk_ea: skey) =
+    (* The EA signs the Approved OS for the Secure Boot process *)
+    let firmware_sig = sign(hash(ApprovedOS), sk_ea) in
+    out(ch_public, (ApprovedOS, firmware_sig)).
+
+(* The BMD Hardware (TPM + Boot ROM) *)
+let processBMD(id: device_id, sk_tpm: skey, pk_ea: pkey) =
+    (* 1. SECURE BOOT & DM-VERITY *)
+    (* Hardware receives an OS and a signature to boot *)
+    in(ch_public, (boot_os: firmware, sig: bitstring));
+    
+    (* Verify EA Signature on the Firmware Hash (Hardware Root of Trust) *)
+    if checksign(sig, pk_ea) = hash(boot_os) then
+    (
+        if boot_os = ApprovedOS then
+        (
+            event OS_Loaded(id, boot_os);
+            (* 2. SYSTEM INTEGRITY ENFORCED *)
+            (* Only if integrity is verified, the TPM key is "unlocked" for use *)
+            event TPM_Key_Unlocked(id);
+            
+            (* 3. VOTING OPERATION *)
+            (* The device can now sign ballots using the non-extractable key *)
+            ! in(ch_public, ballot_data: bitstring);
+            event BallotSigned(ballot_data, id);
+            let attestation = sign(ballot_data, sk_tpm) in
+            out(ch_public, (ballot_data, attestation))
+        )
+        else 0 (* Boot Termination - Hardware detects unauthorized OS *)
+    )
+    else 0. (* Immediate termination - Signature mismatch *)
+
+(* --- MAIN SYSTEM --- *)
+process
+    (* Setup Keys *)
+    new sk_ea: skey; let pk_ea = pk(sk_ea) in
+    out(ch_public, pk_ea);
+
+    (* BMD uses free names dev1, sk_tpm1 for query compatibility *)
+    (
+        processEA(sk_ea) | 
+        processBMD(dev1, sk_tpm1, pk_ea) |
+        
+        (* Simulate EA (or corrupted EA) sending signed Tampered OS; BMD rejects via boot_os = ApprovedOS *)
+        out(ch_public, (TamperedOS, sign(hash(TamperedOS), sk_ea)))
+    )
