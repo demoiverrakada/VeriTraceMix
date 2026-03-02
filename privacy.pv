@@ -1,3 +1,8 @@
+(* ============================================================
+    OPEN-VOTING: BALLOT ANONYMITY & PRIVACY (G7 & G8)
+    Mechanism: Mixnet with Re-encryption
+   ============================================================ *)
+
 (* --- TYPES --- *)
 type skey. type pkey. type cred. type vote. type seed.
 type zkp_mem. type nullifier.
@@ -8,11 +13,11 @@ free ch_pub: channel.
 (* --- CRYPTO PRIMITIVES --- *)
 fun pk(skey): pkey.
 
-(* 1. Improved Encryption Modeling *)
+(* 1. Probabilistic Encryption & Re-encryption *)
 fun enc(vote, pkey, seed): bitstring.
 fun re_enc(bitstring, pkey, seed): bitstring.
 
-(* Decryption works for both original and re-encrypted ballots *)
+(* Reduc: Decryption works for both original and re-encrypted ballots *)
 reduc forall v: vote, k: skey, s: seed; 
       dec(enc(v, pk(k), s), k) = v;
       forall v: vote, k: skey, s: seed, s2: seed; 
@@ -32,36 +37,47 @@ const V1, V2: vote.
 
 (* --- PROCESSES --- *)
 
+(* Voter chooses a candidate based on the 'choice' operator for privacy testing *)
 let processVoter(sk_v: skey, v_cred: cred, pk_ra: pkey, pk_elect: pkey, v: vote) =
     new s: seed;
     let ballot = enc(v, pk_elect, s) in
     let n = gen_null(sk_v) in
     let pi = prove_membership(sk_v, v_cred) in
+    (* Voter remains anonymous (No Public Key sent) *)
     out(ch_pub, (ballot, pi, n)).
 
-let processMixNode(pk_elect: pkey) =
+(* The Honest MixNode: The 'Laundry Machine' *)
+let processMixNode(pk_ra: pkey, pk_elect: pkey) =
     in(ch_pub, (b1: bitstring, p1: zkp_mem, n1: nullifier));
     in(ch_pub, (b2: bitstring, p2: zkp_mem, n2: nullifier));
     
-    if verify_zkp(p1, pk_elect) = true then
-    if verify_zkp(p2, pk_elect) = true then
+    if verify_zkp(p1, pk_ra) = true then
+    if verify_zkp(p2, pk_ra) = true then
+    (
       new s1: seed; new s2: seed;
+      (* THE SECURITY: Re-encryption changes the bitstring's appearance *)
       let b1_shuffled = re_enc(b1, pk_elect, s1) in
       let b2_shuffled = re_enc(b2, pk_elect, s2) in
-      (* Shuffling the output order is crucial for observational equivalence *)
-      (out(ch_pub, b1_shuffled) | out(ch_pub, b2_shuffled)).
+      
+      (* THE SHUFFLE: Outputting in parallel hides the order *)
+      (out(ch_pub, b1_shuffled) | out(ch_pub, b2_shuffled))
+    ).
 
 (* --- MAIN SYSTEM --- *)
 process
-    new sk_ra: skey; let pk_ra = pk(sk_ra) in
+    (* Setup Authorities *)
+    new sk_ra: skey;    let pk_ra = pk(sk_ra) in
     new sk_elect: skey; let pk_elect = pk(sk_elect) in
     out(ch_pub, (pk_ra, pk_elect));
 
+    (* Register two distinct voters *)
     new sk_vA: skey; let credA = sign(sk_ra, pk(sk_vA)) in
     new sk_vB: skey; let credB = sign(sk_ra, pk(sk_vB)) in
 
     (
+        (* We test if Universe(A->V1, B->V2) is indistinguishable from Universe(A->V2, B->V1) *)
         processVoter(sk_vA, credA, pk_ra, pk_elect, choice[V1, V2]) |
         processVoter(sk_vB, credB, pk_ra, pk_elect, choice[V2, V1]) |
-        processMixNode(pk_ra)
+        
+        processMixNode(pk_ra, pk_elect)
     )
