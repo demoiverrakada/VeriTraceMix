@@ -1,0 +1,97 @@
+(* ============================================================
+    OPEN-VOTING: SECURE TRANSPORT & MALPRACTICE DETECTION (G13)
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type device_id. type hash_val.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_usb_physical: channel.
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+(* 1. Encryption for the USB *)
+fun enc(bitstring, pkey, seed): bitstring.
+reduc forall m: bitstring, k: skey, s: seed; dec(enc(m, pk(k), s), k) = m.
+
+(* 2. Hardware Signatures (TPM) *)
+fun hw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
+
+(* 3. Chain Hashing Logic *)
+fun h(bitstring, hash_val): hash_val.
+const InitialSeed: hash_val.
+
+(* THE FIX: Type converter to allow hashing of 'vote' types *)
+fun vote2bit(vote): bitstring [typeConverter].
+
+(* --- CONSTANTS & EVENTS --- *)
+const V1, V2: vote.
+const Dev1: device_id.
+
+event BMD_Published_Final_Hash(device_id, hash_val).
+event Admin_Verified_Integrity(device_id, hash_val).
+event MalpracticeDetected(device_id).
+
+(* --- QUERIES --- *)
+query id: device_id, hv: hash_val; 
+      event(Admin_Verified_Integrity(id, hv)) ==> event(BMD_Published_Final_Hash(id, hv)).
+
+(* --- PROCESSES --- *)
+
+let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey) =
+    (* 1. Voting Phase: Use the type converter vote2bit() to hash the votes *)
+    let v1_data = V1 in
+    let h1 = h(vote2bit(v1_data), InitialSeed) in
+    
+    let v2_data = V2 in
+    let h_final = h(vote2bit(v2_data), h1) in
+    
+    (* 2. PRE-PUBLICATION: Publicly commit to the hash *)
+    event BMD_Published_Final_Hash(id, h_final);
+    out(ch_public, (id, h_final));
+    
+    (* 3. USB PREPARATION *)
+    new s: seed;
+    (* Note: A tuple of (vote, vote) is automatically a bitstring in ProVerif *)
+    let usb_content = (v1_data, v2_data) in
+    let encrypted_payload = enc(usb_content, pk_elect, s) in
+    let seal = hw_sign((id, encrypted_payload), sk_tpm) in
+    
+    out(ch_usb_physical, (id, encrypted_payload, seal)).
+
+let processAdmin(pk_tpm_auth: pkey, sk_elect: skey) =
+    (* 1. Receive the Global Commitment *)
+    in(ch_public, (=Dev1, published_hv: hash_val));
+    
+    (* 2. Receive the USB data *)
+    in(ch_usb_physical, (id: device_id, payload: bitstring, seal: bitstring));
+    
+    (* 3. Verify Hardware Signature *)
+    if check_hw(seal, pk_tpm_auth) = (id, payload) then
+    (
+        (* 4. Decrypt the sequence from the USB *)
+        let (v1: bitstring, v2: bitstring) = dec(payload, sk_elect) in
+        
+        (* 5. RE-CALCULATE THE HASH CHAIN *)
+        (* Since dec() returns bitstring, we don't need the converter here *)
+        let h1_check = h(v1, InitialSeed) in
+        let h_final_check = h(v2, h1_check) in
+        
+        (* 6. THE MALPRACTICE CHECK *)
+        if h_final_check = published_hv then
+            event Admin_Verified_Integrity(id, h_final_check)
+        else
+            event MalpracticeDetected(id)
+    ).
+
+process
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    new sk_tpm: skey;   let pk_tpm = pk(sk_tpm) in
+    out(ch_public, (pk_elect, pk_tpm));
+
+    ( processBMD(Dev1, sk_tpm, pk_elect) | 
+      processAdmin(pk_tpm, sk_elect) )

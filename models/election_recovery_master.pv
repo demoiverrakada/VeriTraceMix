@@ -1,4 +1,4 @@
-(* --- TYPES --- *)
+(* --- TYPES (Declared only once) --- *)
 type skey. type pkey. type vote. type seed.
 type device_id. type tally_proof.
 
@@ -10,7 +10,7 @@ free ch_voter_bmd: channel [private].
 (* --- CRYPTO PRIMITIVES --- *)
 fun pk(skey): pkey.
 
-(* 1. Threshold Encryption *)
+(* 1. Encryption *)
 fun enc(vote, pkey, seed): bitstring.
 reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
 
@@ -18,19 +18,22 @@ reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
 fun hw_sign(bitstring, skey): bitstring.
 reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
 
-(* 3. Universal Verifiability: Zero-Knowledge Proof of Tally *)
-(* This allows the Admin to prove that 'Result' is the decryption of 'Ballot' 
-   without revealing the secret key to the public. *)
+(* 3. Zero-Knowledge Proof of Tally *)
 fun prove_tally(bitstring, vote, skey): tally_proof.
 reduc forall b: bitstring, v: vote, k: skey;
       verify_tally(prove_tally(b, v, k), b, v, pk(k)) = true.
 
 (* --- CONSTANTS & EVENTS --- *)
 const V1, V2: vote.
+
 event VoterCasts(device_id, vote).
 event BB_Published(device_id, bitstring).
-event DeviceRevoked(device_id). (* Goal 15: Recovery *)
-event TallyConfirmed(vote).     (* Goal 6: Universal Audit *)
+event TallyConfirmed(vote). 
+
+(* ACCOUNTABILITY EVENTS (G14 & G15) *)
+event MalpracticeDetected(device_id).
+event DeviceRevoked(device_id). 
+event TriggerRepoll(device_id). (* Localized Recovery Logic *)
 
 (* --- TABLES --- *)
 table BulletinBoard(device_id, bitstring, bitstring). (* ID, Ballot, Signature *)
@@ -38,33 +41,42 @@ table RevocationList(device_id).
 
 (* --- QUERIES --- *)
 
-(* GOAL 15: Recovery/Accountability - DeviceRevoked can occur (dispute path reachable) *)
-query id: device_id; event(DeviceRevoked(id)).
+(* GOAL 15: Recovery 
+   If a re-poll is triggered, it's because malpractice was detected at that device. *)
+query id: device_id; 
+      event(TriggerRepoll(id)) ==> event(MalpracticeDetected(id)).
 
 (* GOAL 6: Universal Verifiability
-   If the public confirms a tally result, it must have been a vote cast by an honest voter. *)
-query v: vote, id: device_id; event(TallyConfirmed(v)) ==> event(VoterCasts(id, v)).
+   Confirmed tally results must correspond to an honest voter's intent. *)
+query v: vote, id: device_id; 
+      event(TallyConfirmed(v)) ==> event(VoterCasts(id, v)).
 
-(* GOAL 7: Privacy (Observational Equivalence)
-   Even during recovery, can an attacker tell how the honest voters voted? *)
-(* Proverif will check this via choice[V1, V2] in the main process *)
+(* GOAL 14: Reachability of Revocation 
+   Does the dispute path actually work? (Expected: FALSE/Found trace) *)
+query id: device_id; event(DeviceRevoked(id)).
 
 (* --- PROCESSES --- *)
 
-(* 1. The Judge: Identifies failures and revokes devices *)
+(* 1. The Judge: The heart of localized recovery *)
 let processJudge(pk_tpm: pkey) =
     in(ch_judge, (id: device_id, ballot: bitstring, receipt: bitstring));
-    (* Verify hardware receipt *)
+    
+    (* Verify hardware receipt provenance *)
     if check_hw(receipt, pk_tpm) = ballot then
-      (
-        (* Check if this ballot exists on the public BB *)
+    (
+        (* Check if the ballot is missing from the public board *)
         get BulletinBoard(=id, =ballot, sig) in
-            0
+            0 (* Found: Admin is honest *)
         else
-          (* Ballot is missing! RECOVER: Revoke the device *)
-          (event DeviceRevoked(id); insert RevocationList(id))
-      )
-    else 0.
+            (* Not Found: Malpractice proven! *)
+            (
+                event MalpracticeDetected(id);
+                event DeviceRevoked(id);
+                insert RevocationList(id);
+                (* G15: Recovery via authorized Re-poll *)
+                event TriggerRepoll(id)
+            )
+    ).
 
 (* 2. The BMD: Secure hardware producing a receipt *)
 let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey, v: vote) =
@@ -73,24 +85,22 @@ let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey, v: vote) =
     let ballot = enc(v, pk_elect, s) in
     let receipt = hw_sign(ballot, sk_tpm) in
     
-    (* Give receipt to voter privately *)
+    (* Hand receipt to voter privately *)
     out(ch_voter_bmd, (ballot, receipt));
     
-    (* Send to BB (In a 'Failure' scenario, this message is intercepted/dropped) *)
+    (* Send to Bulletin Board (In failure scenario, this is dropped) *)
     event BB_Published(id, ballot);
     out(ch_pub, (id, ballot, receipt)).
 
-(* 3. The Auditor/Public: Final Universal Tally Check *)
-let processAuditor(pk_elect: pkey, pk_tpm: pkey) =
-    (* Auditor looks at the BB and the Tally Proof *)
+(* 3. The Auditor/Public: Universal Audit *)
+let processAuditor(pk_elect: pkey) =
     in(ch_pub, (id: device_id, ballot: bitstring, result_v: vote, p: tally_proof));
-    (* Check if device was revoked *)
+    (* Only accept results from non-revoked devices *)
     get RevocationList(=id) in 0 else
-      (
+    (
         if verify_tally(p, ballot, result_v, pk_elect) = true then
           event TallyConfirmed(result_v)
-        else 0
-      ).
+    ).
 
 (* --- MAIN SYSTEM --- *)
 process
@@ -102,25 +112,23 @@ process
     out(ch_pub, (pk_elect, pk_tpm1, pk_tpm2, id1, id2));
 
     (
-        (* DEVICE 1: HONEST (use V1,V2; for privacy run with choice[V1,V2]/choice[V2,V1] without queries) *)
+        (* BOOTH 1: HONEST *)
         processBMD(id1, sk_tpm1, pk_elect, V1) |
         
-        (* DEVICE 2: FAILS (Voter gets receipt, but Admin 'drops' the ballot) *)
+        (* BOOTH 2: MALPRACTICE (Admin drops the ballot, Voter triggers Judge) *)
         (
             processBMD(id2, sk_tpm2, pk_elect, V2) |
             in(ch_voter_bmd, (b: bitstring, r: bitstring));
-            out(ch_judge, (id2, b, r)) (* Voter disputes failure *)
+            (* Voter observes ballot is missing from PBB and goes to Judge *)
+            out(ch_judge, (id2, b, r)) 
         ) |
 
         (* SYSTEM LOGIC *)
         processJudge(pk_tpm2) |
         
-        (* TALLYING: Admin only provides proofs for AUTHORIZED hardware ballots *)
+        (* TALLYING AUTHORITY *)
         ! (
             in(ch_pub, (id: device_id, b: bitstring, r: bitstring));
-            
-            (* CRITICAL FIX: Admin must verify the Hardware Signature before Tallying *)
-            (* In a real system, the Admin checks if 'id' is in the registered BMD list *)
             if (check_hw(r, pk_tpm1) = b) || (check_hw(r, pk_tpm2) = b) then
             (
                 insert BulletinBoard(id, b, r);
@@ -130,6 +138,6 @@ process
             )
         ) |
         
-        (* UNIVERSAL AUDIT *)
-        processAuditor(pk_elect, pk_tpm1)
+        (* PUBLIC AUDITOR *)
+        processAuditor(pk_elect)
     )
