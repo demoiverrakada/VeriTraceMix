@@ -36,8 +36,8 @@ Each file verifies a specific subset of the 15 security goals:
 | `platform_integrity.pv` | **G10, G11** | Platform Integrity & Key Secrecy: Secure Boot chain enforced via TEE/TPM. Ballots can only be signed after ApprovedOS is loaded. |
 | `secure_transport.pv` | **G13** | Transport Integrity & Attack Detection: Hash-chain commitment prevents undetected USB tampering. |
 | `election_recovery_master.pv` | **G12, G14, G15** | Provenance, Device Revocation & Localized Recovery: Every bulletin board entry traces to a registered BMD; malpractice triggers a targeted re-poll. |
-| *(out of scope)* | **G4** | **Tally Correctness** — Paillier additive homomorphism cannot be expressed in ProVerif's equational theory. This is the standard limitation of symbolic verification shared by all ProVerif-based e-voting proofs in the literature. G4 requires CryptoVerif or a pen-and-paper reduction. |
 
+> **G4 — Tally Correctness** is out of scope for ProVerif. Paillier additive homomorphism cannot be expressed in ProVerif's equational theory. This is a standard limitation of symbolic verification shared by all ProVerif-based e-voting proofs in the literature. G4 would require CryptoVerif or a pen-and-paper proof.
 
 ### Negative Tests (`negative_tests/`)
 
