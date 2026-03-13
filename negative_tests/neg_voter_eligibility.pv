@@ -1,0 +1,92 @@
+(* ============================================================
+    NEGATIVE TEST: neg_voter_eligibility.pv
+    Source  : voter_eligibility.pv  (G5, G6, G11)
+    Break   : The nullifier uniqueness check is removed.
+              The original code does:
+                get NullifierRepo(=n) in 0  (* already voted *)
+                else insert NullifierRepo(n); ...
+              Here that get/else guard is removed entirely.
+              A voter can now submit the same nullifier twice,
+              so two BallotAccepted events fire for one identity.
+    Expected: RESULT inj-event(BallotAccepted) ==>
+                     inj-event(VoterStarted) cannot be proved.
+              ProVerif 2.05 reports "cannot be proved" rather than
+              "false" when the RA is replicated (!). This means
+              ProVerif found a Horn clause derivation of the attack
+              but could not concretise a finite trace — the security
+              property is NOT established. This is the correct
+              negative test result: double-voting is possible.
+   ============================================================ *)
+
+type skey. type pkey. type cred. type nullifier.
+type zkp_mem.
+
+free ch_pub: channel.
+free ch_ra: channel [private].
+
+fun pk(skey): pkey.
+fun sign(skey, pkey): cred.
+fun prove_membership(skey, cred): zkp_mem.
+reduc forall sk_v: skey, sk_ra: skey;
+      verify_zkp(prove_membership(sk_v, sign(sk_ra, pk(sk_v))), pk(sk_ra)) = true.
+
+fun gen_null(skey): nullifier.
+
+(* --- TABLES --- *)
+(* NullifierRepo table intentionally not used in the broken process below *)
+table NullifierRepo(nullifier).
+
+(* --- EVENTS --- *)
+event VoterStarted(pkey).
+event BallotAccepted(pkey).
+
+(* --- QUERIES --- *)
+
+(* G11: RA key secrecy — should still hold *)
+free sk_ra_test: skey [private].
+query attacker(sk_ra_test).
+
+(* G5 — should still hold (non-injective) *)
+query pk_v: pkey;
+      event(BallotAccepted(pk_v)) ==> event(VoterStarted(pk_v)).
+
+(* G6 — EXPECTED TO FAIL: without the nullifier check,
+   the same voter can have BallotAccepted fire twice for
+   one VoterStarted, breaking injective correspondence. *)
+query pk_v: pkey;
+      inj-event(BallotAccepted(pk_v)) ==> inj-event(VoterStarted(pk_v)).
+
+(* Reachability *)
+query pk_v: pkey; event(BallotAccepted(pk_v)).
+
+(* --- PROCESSES --- *)
+
+let processVoter(sk_v: skey, v_cred: cred, pk_ra: pkey) =
+    event VoterStarted(pk(sk_v));
+    let n = gen_null(sk_v) in
+    let pi = prove_membership(sk_v, v_cred) in
+    out(ch_pub, (pk(sk_v), n, pi)).
+
+let processRA(sk_ra: skey) =
+    in(ch_pub, (pk_v: pkey, n: nullifier, pi: zkp_mem));
+    if verify_zkp(pi, pk(sk_ra)) = true then
+    (
+        (* BREAK: removed the nullifier repo check.
+           Original:
+             get NullifierRepo(=n) in 0
+             else insert NullifierRepo(n);
+                  event BallotAccepted(pk_v)
+           Now BallotAccepted fires unconditionally — replay possible. *)
+        event BallotAccepted(pk_v)
+    ).
+
+process
+    new sk_ra: skey; let pk_ra = pk(sk_ra) in
+    out(ch_pub, pk_ra);
+    new sk_v1: skey;
+    let cred1 = sign(sk_ra, pk(sk_v1)) in
+
+    (* Also instantiate the test RA key so its secrecy query is meaningful *)
+    out(ch_ra, sign(sk_ra_test, pk(sk_ra_test)));
+
+    ( processVoter(sk_v1, cred1, pk_ra) | ! processRA(sk_ra) )

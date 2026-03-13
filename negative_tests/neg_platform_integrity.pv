@@ -1,0 +1,94 @@
+(* ============================================================
+    NEGATIVE TEST: neg_platform_integrity.pv
+    Source  : platform_integrity.pv  (G10, G11)
+    Break   : The OS identity check in processBMD is removed.
+              Original:
+                if boot_os = ApprovedOS then (
+                    event OS_Loaded(id, boot_os); ... )
+                else 0  (* boot termination *)
+              Here the else-branch is removed and the OS check
+              is gone. The BMD will sign ballots after loading
+              ANY firmware — including TamperedOS.
+    Expected: RESULT event(BallotSigned(b, dev1)) ==>
+                     event(OS_Loaded(dev1, ApprovedOS)) is FALSE.
+              ProVerif must find an attack: a ballot is signed
+              after TamperedOS is loaded, with no OS_Loaded for
+              ApprovedOS in the trace.
+   ============================================================ *)
+
+type skey.
+type pkey.
+type firmware.
+type device_id.
+
+free ch_public: channel.
+free ch_tpm: channel [private].
+
+fun pk(skey): pkey.
+
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; checksign(sign(m, k), pk(k)) = m.
+
+fun hash(firmware): bitstring.
+
+const ApprovedOS: firmware.
+const TamperedOS: firmware.
+const BootSuccess: bitstring.
+
+event OS_Loaded(device_id, firmware).
+event TPM_Key_Unlocked(device_id).
+event BallotSigned(bitstring, device_id).
+
+free dev1: device_id.
+free sk_tpm1: skey [private].
+
+(* --- QUERIES --- *)
+
+(* G11: Key secrecy — should still hold *)
+query attacker(sk_tpm1).
+
+(* G10 secure boot — EXPECTED TO FAIL: without the OS identity
+   check the BMD signs ballots after loading TamperedOS, so
+   BallotSigned no longer implies OS_Loaded(dev1, ApprovedOS). *)
+query b: bitstring;
+      event(BallotSigned(b, dev1)) ==> event(OS_Loaded(dev1, ApprovedOS)).
+
+(* TPM unlock chain — also expected to fail for same reason *)
+query b: bitstring, id: device_id;
+      event(BallotSigned(b, id)) ==> event(TPM_Key_Unlocked(id)).
+
+(* Reachability *)
+query b: bitstring; event(BallotSigned(b, dev1)).
+
+(* --- PROCESSES --- *)
+
+let processEA(sk_ea: skey) =
+    let firmware_sig = sign(hash(ApprovedOS), sk_ea) in
+    out(ch_public, (ApprovedOS, firmware_sig)).
+
+let processBMD(id: device_id, sk_tpm: skey, pk_ea: pkey) =
+    in(ch_public, (boot_os: firmware, sig: bitstring));
+    if checksign(sig, pk_ea) = hash(boot_os) then
+    (
+        (* BREAK: removed   if boot_os = ApprovedOS then ... else 0   *)
+        (* Any EA-signed firmware now causes OS_Loaded + ballot signing,
+           including TamperedOS. *)
+        event OS_Loaded(id, boot_os);
+        event TPM_Key_Unlocked(id);
+
+        ! in(ch_public, ballot_data: bitstring);
+        event BallotSigned(ballot_data, id);
+        let attestation = sign(ballot_data, sk_tpm) in
+        out(ch_public, (ballot_data, attestation))
+    )
+    else 0.
+
+process
+    new sk_ea: skey; let pk_ea = pk(sk_ea) in
+    out(ch_public, pk_ea);
+
+    (
+        processEA(sk_ea) |
+        processBMD(dev1, sk_tpm1, pk_ea) |
+        out(ch_public, (TamperedOS, sign(hash(TamperedOS), sk_ea)))
+    )

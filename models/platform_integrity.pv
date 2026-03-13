@@ -34,12 +34,40 @@ free dev1: device_id.
 free sk_tpm1: skey [private].
 
 (* --- QUERIES --- *)
-(* 1. Secrecy of the TPM Key: Can the attacker extract the non-extractable key? *)
+
+(* G11 - KEY SECRECY
+   Can the Dolev-Yao attacker extract the non-extractable TPM private key?
+   Expected: true (attacker never learns sk_tpm1) *)
 query attacker(sk_tpm1).
-(* 2. Integrity: Can a ballot be signed if the OS loaded was not ApprovedOS? *)
+
+(* G10 - PLATFORM INTEGRITY: Secure Boot Chain
+   Can a ballot be signed if the loaded OS was NOT ApprovedOS?
+   Expected: true (BallotSigned only reachable after OS_Loaded with ApprovedOS) *)
 query b: bitstring; event(BallotSigned(b, dev1)) ==> event(OS_Loaded(dev1, ApprovedOS)).
-(* 3. Counterfeit: Can an attacker sign a ballot if they don't have the hardware sk_tpm1? *)
-query b: bitstring; attacker(sign(b, sk_tpm1)).
+
+(* G10 - TPM UNLOCK PROVENANCE: Full chain check
+   Was the TPM key legitimately unlocked before any ballot was signed?
+   Closes the chain: ApprovedOS loaded -> TPM unlocked -> ballot signed.
+   Expected: true (signing cannot occur without prior TPM unlock) *)
+query b: bitstring, id: device_id;
+      event(BallotSigned(b, id)) ==> event(TPM_Key_Unlocked(id)).
+
+(* NOTE - WHY THE ORIGINAL QUERY 3 WAS REPLACED
+   The original query was: attacker(sign(b, sk_tpm1))
+   This returned false, meaning the attacker CAN obtain sign(b, sk_tpm1).
+   This is expected and CORRECT behaviour: the BMD is designed to sign
+   ballot_data received from ch_public and output the attestation.
+   The attacker receives the output of every signing as the channel is public.
+   The query was asking the wrong question.
+   The meaningful property is not "can the attacker hold a signature" but
+   "can the attacker cause a signing without legitimate boot" - which is
+   captured by the two event-correspondence queries above. *)
+
+(* REACHABILITY SANITY CHECK
+   Does the honest ballot-signing path actually fire?
+   Guards against vacuous truth on the queries above.
+   Expected: false in ProVerif = BallotSigned IS reachable (correct) *)
+query b: bitstring; event(BallotSigned(b, dev1)).
 
 (* --- PROCESSES --- *)
 

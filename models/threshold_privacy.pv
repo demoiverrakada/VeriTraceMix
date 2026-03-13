@@ -1,3 +1,11 @@
+(* ============================================================
+    PILLAR 4: THRESHOLD PRIVACY (G9)
+    Verifies that ballot secrecy holds even when (n-1) of n
+    tallying authorities are corrupt.
+    Run with: proverif -equivalence models/threshold_privacy.pv
+    Expected: Observational equivalence is true
+   ============================================================ *)
+
 (* --- TYPES --- *)
 type skey. type pkey. type vote. type seed.
 type part_dec.

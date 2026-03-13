@@ -1,0 +1,104 @@
+(* ============================================================
+    NEGATIVE TEST: neg_secure_transport.pv
+    Source  : secure_transport.pv  (G13)
+    Break   : The hash comparison check in processAdmin is removed.
+              Original:
+                if h_final_check = published_hv then
+                    event Admin_Verified_Integrity(...)
+                else
+                    event MalpracticeDetected(...)
+              Here that branch is replaced with an unconditional
+              Admin_Verified_Integrity — the admin accepts any
+              USB payload regardless of whether its hash matches
+              the BMD's public commitment.
+    Expected: RESULT event(Admin_Verified_Integrity(id, hv)) ==>
+                     event(BMD_Published_Final_Hash(id, hv)) is FALSE.
+              ProVerif must find an attack: the attacker tampers
+              with the USB content, producing a different hash,
+              but Admin_Verified_Integrity still fires with the
+              original published hash value — breaking the causal
+              correspondence.
+   ============================================================ *)
+
+type skey. type pkey. type vote. type seed.
+type device_id. type hash_val.
+
+free ch_public: channel.
+free ch_usb_physical: channel.
+
+fun pk(skey): pkey.
+
+fun enc(bitstring, pkey, seed): bitstring.
+reduc forall m: bitstring, k: skey, s: seed; dec(enc(m, pk(k), s), k) = m.
+
+fun hw_sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
+
+fun h(bitstring, hash_val): hash_val.
+const InitialSeed: hash_val.
+
+fun vote2bit(vote): bitstring [typeConverter].
+
+const V1, V2: vote.
+const Dev1: device_id.
+
+event BMD_Published_Final_Hash(device_id, hash_val).
+event Admin_Verified_Integrity(device_id, hash_val).
+event MalpracticeDetected(device_id).
+
+(* --- QUERIES --- *)
+
+(* G13 main property — EXPECTED TO FAIL: without the hash check,
+   Admin_Verified_Integrity fires with any hv, including ones never
+   committed to by the BMD. *)
+query id: device_id, hv: hash_val;
+      event(Admin_Verified_Integrity(id, hv)) ==> event(BMD_Published_Final_Hash(id, hv)).
+
+(* Reachability checks *)
+query id: device_id, hv: hash_val; event(Admin_Verified_Integrity(id, hv)).
+query id: device_id; event(MalpracticeDetected(id)).
+
+(* --- PROCESSES --- *)
+
+let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey) =
+    let v1_data = V1 in
+    let h1 = h(vote2bit(v1_data), InitialSeed) in
+    let v2_data = V2 in
+    let h_final = h(vote2bit(v2_data), h1) in
+
+    event BMD_Published_Final_Hash(id, h_final);
+    out(ch_public, (id, h_final));
+
+    new s: seed;
+    let usb_content = (v1_data, v2_data) in
+    let encrypted_payload = enc(usb_content, pk_elect, s) in
+    let seal = hw_sign((id, encrypted_payload), sk_tpm) in
+    out(ch_usb_physical, (id, encrypted_payload, seal)).
+
+let processAdmin(pk_tpm_auth: pkey, sk_elect: skey) =
+    in(ch_public, (=Dev1, published_hv: hash_val));
+    in(ch_usb_physical, (id: device_id, payload: bitstring, seal: bitstring));
+
+    if check_hw(seal, pk_tpm_auth) = (id, payload) then
+    (
+        let (v1: bitstring, v2: bitstring) = dec(payload, sk_elect) in
+        let h1_check = h(v1, InitialSeed) in
+        let h_final_check = h(v2, h1_check) in
+
+        (* BREAK: removed hash comparison.
+           Original:
+             if h_final_check = published_hv then
+                 event Admin_Verified_Integrity(id, h_final_check)
+             else
+                 event MalpracticeDetected(id)
+           Now integrity is always confirmed regardless of hash match. *)
+        event Admin_Verified_Integrity(id, published_hv)
+    ).
+
+process
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    new sk_tpm: skey;   let pk_tpm = pk(sk_tpm) in
+    out(ch_public, (pk_elect, pk_tpm));
+
+    ( processBMD(Dev1, sk_tpm, pk_elect) |
+      processAdmin(pk_tpm, sk_elect) )

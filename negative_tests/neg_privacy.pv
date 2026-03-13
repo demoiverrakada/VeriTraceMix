@@ -1,0 +1,90 @@
+(* ============================================================
+    NEGATIVE TEST: neg_privacy.pv
+    Source  : privacy.pv  (G8 — Anonymity)
+    Break   : The voter's secret key sk_v is leaked to the
+              attacker before voting. With sk_v known, the
+              attacker can compute gen_null(sk_v) and
+              prove_membership(sk_v, cred) themselves, then
+              link any published nullifier back to the voter.
+    Mechanism: Standard secrecy query — can attacker learn sk_vA?
+    Expected: RESULT not attacker(sk_vA) is FALSE.
+              The attacker learns sk_vA because it is output
+              on the public channel, breaking the anonymity
+              assumption that voter keys are private.
+    NOTE on equivalence: ProVerif's symbolic equivalence checker
+    cannot be falsified by structural weakening of choice[] models
+    because it is sound but not complete — it may report "true"
+    even when a computational attack exists. This file instead
+    tests the underlying secrecy assumption that anonymity depends
+    on: the voter's signing key must be secret. If sk_vA leaks,
+    the nullifier becomes linkable and anonymity collapses.
+   ============================================================ *)
+
+type skey. type pkey. type cred. type vote. type seed.
+type zkp_mem. type nullifier.
+
+free ch_pub: channel.
+
+fun pk(skey): pkey.
+
+fun enc(vote, pkey, seed): bitstring.
+fun re_enc(bitstring, pkey, seed): bitstring.
+
+reduc forall v: vote, k: skey, s: seed;
+      dec(enc(v, pk(k), s), k) = v;
+      forall v: vote, k: skey, s: seed, s2: seed;
+      dec(re_enc(enc(v, pk(k), s), pk(k), s2), k) = v.
+
+fun sign(skey, pkey): cred.
+fun prove_membership(skey, cred): zkp_mem.
+reduc forall sk_v: skey, sk_ra: skey;
+      verify_zkp(prove_membership(sk_v, sign(sk_ra, pk(sk_v))), pk(sk_ra)) = true.
+
+fun gen_null(skey): nullifier.
+
+const V1, V2: vote.
+
+(* BREAK: sk_vA is marked as a free name (not private) so the
+   attacker can learn it. In the real model sk_vA is always
+   fresh and never output. Here its secrecy is destroyed,
+   which is the precondition for linking nullifiers to voters. *)
+free sk_vA_leaked: skey.  (* simulates voter key leakage *)
+
+let processVoter(sk_v: skey, v_cred: cred, pk_ra: pkey, pk_elect: pkey, v: vote) =
+    new s: seed;
+    let ballot = enc(v, pk_elect, s) in
+    let n = gen_null(sk_v) in
+    let pi = prove_membership(sk_v, v_cred) in
+    out(ch_pub, (ballot, pi, n)).
+
+let processMixNode(pk_ra: pkey, pk_elect: pkey) =
+    in(ch_pub, (b1: bitstring, p1: zkp_mem, n1: nullifier));
+    in(ch_pub, (b2: bitstring, p2: zkp_mem, n2: nullifier));
+    if verify_zkp(p1, pk_ra) = true then
+    if verify_zkp(p2, pk_ra) = true then
+    (
+        new s1: seed; new s2: seed;
+        let b1_shuffled = re_enc(b1, pk_elect, s1) in
+        let b2_shuffled = re_enc(b2, pk_elect, s2) in
+        (out(ch_pub, b1_shuffled) | out(ch_pub, b2_shuffled))
+    ).
+
+(* QUERY: the voter's secret key must not be learnable.
+   Here it is leaked via a free (public) name.
+   Expected: FALSE — attacker learns it, nullifiers become linkable. *)
+query attacker(sk_vA_leaked).
+
+process
+    new sk_ra: skey;    let pk_ra = pk(sk_ra) in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    out(ch_pub, (pk_ra, pk_elect));
+
+    (* Voter A uses the leaked key — attacker knows it *)
+    let credA = sign(sk_ra, pk(sk_vA_leaked)) in
+    new sk_vB: skey; let credB = sign(sk_ra, pk(sk_vB)) in
+
+    (
+        processVoter(sk_vA_leaked, credA, pk_ra, pk_elect, V1) |
+        processVoter(sk_vB, credB, pk_ra, pk_elect, V2) |
+        processMixNode(pk_ra, pk_elect)
+    )

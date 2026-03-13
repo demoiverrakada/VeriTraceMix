@@ -30,24 +30,48 @@ const CandidateA, CandidateB: vote_t.
 const MyElection: election_id.
 
 event Registered(pkey).
-event BallotAccepted(null_t, id_mark). (* Included id_mark *)
+event BallotAccepted(null_t, id_mark).
 event VoterStarted(pkey, null_t).
 
 table NullifierRepo(null_t).
 
-(* --- THE COMPATIBILITY RESTRICTION --- 
-   This tells ProVerif: If the same nullifier 'n' is accepted with 
-   two different markers 'i1' and 'i2', then i1 and i2 must be equal. 
-   This effectively forces the event to be unique per nullifier. *)
+(* --- G11: RA KEY SECRECY ---
+   Declared free [private] so the attacker does not start with knowledge
+   of it. The secrecy query below checks it is never leaked. *)
+free sk_ra_test: skey [private].
+
+(* --- RESTRICTION: nullifier uniqueness ---
+   If the same nullifier n is accepted twice with markers i1 and i2,
+   then i1 = i2 — meaning only one acceptance event per nullifier. *)
 restriction n: null_t, i1: id_mark, i2: id_mark;
     event(BallotAccepted(n, i1)) && event(BallotAccepted(n, i2)) ==> i1 = i2.
 
 (* --- QUERIES --- *)
-query n: null_t, pk_v: pkey, i: id_mark; 
-      event(BallotAccepted(n, i)) ==> event(Registered(pk_v)).
 
+(* G11 - RA KEY SECRECY
+   If the attacker learns sk_ra they can forge credentials for any voter.
+   Expected: true (sk_ra never learned by attacker) *)
+query attacker(sk_ra_test).
+
+(* G5 - ELIGIBILITY
+   Every accepted ballot traces back through a nullifier to a voter who
+   legitimately started the process. Replaces the old Registered query
+   which had an unbound pk_v disconnected from the nullifier.
+   Expected: true *)
+query n: null_t, pk_v: pkey, i: id_mark;
+      event(BallotAccepted(n, i)) ==> event(VoterStarted(pk_v, n)).
+
+(* G6 - UNIQUENESS: one ballot per voter
+   Injective correspondence: each acceptance maps to a distinct start.
+   The nullifier n binds both sides — same voter cannot submit twice.
+   Expected: true *)
 query n: null_t, pk_v: pkey, i: id_mark; 
       inj-event(BallotAccepted(n, i)) ==> inj-event(VoterStarted(pk_v, n)).
+
+(* REACHABILITY SANITY CHECK
+   Does the BB actually accept a ballot? Guards against vacuous G5/G6.
+   Expected: false in ProVerif = BallotAccepted IS reachable *)
+query n: null_t, i: id_mark; event(BallotAccepted(n, i)).
 
 (* --- PROCESSES --- *)
 

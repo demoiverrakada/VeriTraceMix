@@ -1,6 +1,27 @@
 (* ============================================================
-    OPEN-VOTING: BALLOT ANONYMITY & PRIVACY (G7 & G8)
-    Mechanism: Mixnet with Re-encryption
+    OPEN-VOTING: VOTER ANONYMITY -- G8
+    Mechanism: Re-encryption Mixnet, Observational Equivalence
+
+    Run mode: proverif -equivalence privacy.pv
+
+    This file verifies G8 ONLY. G7 (Ballot Secrecy) is in
+    privacy_secrecy.pv and runs in standard mode.
+
+    G8 ANONYMITY:
+      Even with full knowledge of all ciphertexts on the bulletin
+      board, an attacker cannot link any ballot to the voter who
+      cast it.
+
+    How it is tested -- bi-process equivalence:
+      We construct two worlds:
+        World 0: Voter A casts V1, Voter B casts V2
+        World 1: Voter A casts V2, Voter B casts V1
+      The choice[] operator encodes both worlds in one process.
+      ProVerif checks whether any attacker can distinguish them.
+      If the worlds are observationally equivalent, the attacker
+      learns nothing about who voted for which candidate.
+
+    Expected result: RESULT Observational equivalence is true.
    ============================================================ *)
 
 (* --- TYPES --- *)

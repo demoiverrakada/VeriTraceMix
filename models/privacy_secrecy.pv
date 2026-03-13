@@ -1,0 +1,122 @@
+(* ============================================================
+    OPEN-VOTING: BALLOT SECRECY — G7
+    
+    This file verifies G7 (Ballot Secrecy) ONLY.
+    Run mode: standard  ->  proverif privacy_secrecy.pv
+    
+    G7 vs G8 — why these are two separate files:
+    
+    G7 BALLOT SECRECY (this file):
+      A passive attacker who intercepts all ciphertexts on the
+      public channel cannot determine the plaintext vote inside.
+      Tested with: query attacker(my_vote)
+      Requires: standard proverif mode
+    
+    G8 ANONYMITY (privacy.pv):
+      Even knowing all ciphertexts, an attacker cannot LINK a
+      specific ballot to the voter who cast it.
+      Tested with: choice[] observational equivalence
+      Requires: proverif -equivalence mode
+    
+    These are distinct properties:
+      - G7 asks "can you READ the vote?"
+      - G8 asks "can you LINK the vote to a person?"
+    An attacker could fail G7 (can't read votes) but still pass
+    G8 (can link ciphertexts to voters via timing/order).
+    Both must be verified independently.
+    
+    NOTE on subsumption: G8 is strictly stronger than G7 in this
+    model. If the two worlds (A->V1,B->V2) vs (A->V2,B->V1) are
+    indistinguishable, then no vote content can be read. However
+    ProVerif cannot verify G8 subsumes G7 automatically — both
+    must be stated as explicit, separately-verified queries.
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed.
+type cred. type zkp_mem. type nullifier.
+
+(* --- CHANNELS --- *)
+free ch_pub: channel.
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+(* Probabilistic encryption: same vote encrypted twice looks different *)
+fun enc(vote, pkey, seed): bitstring.
+
+(* Re-encryption: changes ciphertext appearance without changing plaintext *)
+fun re_enc(bitstring, pkey, seed): bitstring.
+
+(* Merged into one reduc: ProVerif does not allow the same function
+   name (dec) to appear in two separate reduc blocks. *)
+reduc forall v: vote, k: skey, s: seed;
+          dec(enc(v, pk(k), s), k) = v;
+      forall v: vote, k: skey, s: seed, s2: seed;
+          dec(re_enc(enc(v, pk(k), s), pk(k), s2), k) = v.
+
+(* Anonymous credential *)
+fun issue_cred(skey, pkey): cred.
+fun prove_membership(skey, cred): zkp_mem.
+reduc forall sk_v: skey, sk_ra: skey;
+      verify_zkp(prove_membership(sk_v, issue_cred(sk_ra, pk(sk_v))), pk(sk_ra)) = true.
+
+fun gen_null(skey): nullifier.
+
+(* --- PRIVATE VOTE — the secret we are protecting --- *)
+(* my_vote is declared private: the attacker does not know its value.
+   G7 asks: after the election runs, can the attacker learn my_vote? *)
+free my_vote: vote [private].
+
+(* --- QUERY --- *)
+
+(* G7: BALLOT SECRECY
+   After the voter encrypts my_vote and the mixnet re-encrypts it,
+   can the attacker recover the plaintext vote?
+   Expected: true (attacker cannot learn my_vote) *)
+query attacker(my_vote).
+
+(* REACHABILITY SANITY CHECK
+   Does the voter actually cast a ballot in this model?
+   Guards against a vacuously true secrecy proof.
+   Expected: false = VoterCast IS reachable *)
+event VoterCast(vote).
+query v: vote; event(VoterCast(v)).
+
+(* --- PROCESSES --- *)
+
+let processVoter(sk_v: skey, v_cred: cred, pk_ra: pkey, pk_elect: pkey, v: vote) =
+    new s: seed;
+    let ballot = enc(v, pk_elect, s) in
+    let n = gen_null(sk_v) in
+    let pi = prove_membership(sk_v, v_cred) in
+    event VoterCast(v);
+    (* Voter sends ballot, ZKP, and nullifier — but NOT their identity *)
+    out(ch_pub, (ballot, pi, n)).
+
+(* The MixNode re-encrypts: ciphertext changes but plaintext is preserved *)
+let processMixNode(pk_ra: pkey, pk_elect: pkey) =
+    in(ch_pub, (b: bitstring, p: zkp_mem, n: nullifier));
+    if verify_zkp(p, pk_ra) = true then
+    (
+        new s2: seed;
+        let b_shuffled = re_enc(b, pk_elect, s2) in
+        out(ch_pub, b_shuffled)
+    ).
+
+(* --- MAIN SYSTEM --- *)
+process
+    new sk_ra: skey;    let pk_ra = pk(sk_ra) in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    (* Public keys are published — attacker knows them *)
+    out(ch_pub, (pk_ra, pk_elect));
+
+    (* Register one voter with a credential *)
+    new sk_v: skey;
+    let v_cred = issue_cred(sk_ra, pk(sk_v)) in
+
+    (
+        (* Voter casts my_vote — the private value we are protecting *)
+        processVoter(sk_v, v_cred, pk_ra, pk_elect, my_vote) |
+        processMixNode(pk_ra, pk_elect)
+    )

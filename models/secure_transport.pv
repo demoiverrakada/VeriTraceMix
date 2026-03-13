@@ -1,5 +1,27 @@
 (* ============================================================
     OPEN-VOTING: SECURE TRANSPORT & MALPRACTICE DETECTION (G13)
+    Run mode: proverif secure_transport.pv  (standard mode)
+
+    G13 ATTACK DETECTION - What this file proves:
+      After polling closes, the BMD publishes a final hash commitment
+      on the public bulletin board BEFORE handing over the USB drive.
+      The admin re-computes the hash chain from the USB contents and
+      checks it matches the published commitment.
+
+      Security property: the admin can only fire Admin_Verified_Integrity
+      if the hash they compute matches what the BMD committed to earlier.
+      Any insertion, deletion, or reordering of votes in the USB payload
+      will produce a different hash and trigger MalpracticeDetected instead.
+
+    Attacker model note:
+      ch_usb_physical is a FREE (public) channel - the Dolev-Yao attacker
+      fully controls USB transport. This is intentional: it makes the proof
+      stronger. Despite this, the TPM seal and hash-chain check prevent
+      the attacker from tampering undetected.
+
+    Bounded model note:
+      This model verifies exactly 2 votes (V1, V2) on one device (Dev1).
+      Scaling to N votes follows the same hash-chain argument.
    ============================================================ *)
 
 (* --- TYPES --- *)
@@ -37,8 +59,25 @@ event Admin_Verified_Integrity(device_id, hash_val).
 event MalpracticeDetected(device_id).
 
 (* --- QUERIES --- *)
-query id: device_id, hv: hash_val; 
+
+(* G13 - TRANSPORT INTEGRITY: Main security property
+   The admin can only confirm integrity if the hash matches the
+   BMD's prior public commitment. A tampered USB produces a
+   different hash and goes to MalpracticeDetected instead.
+   Expected: true *)
+query id: device_id, hv: hash_val;
       event(Admin_Verified_Integrity(id, hv)) ==> event(BMD_Published_Final_Hash(id, hv)).
+
+(* REACHABILITY 1: Does the honest verification path actually fire?
+   Guards against Admin_Verified_Integrity being unreachable,
+   which would make the causal query above vacuously true.
+   Expected: false = Admin_Verified_Integrity IS reachable *)
+query id: device_id, hv: hash_val; event(Admin_Verified_Integrity(id, hv)).
+
+(* REACHABILITY 2: Does the malpractice detection path actually fire?
+   Confirms the MalpracticeDetected branch is reachable when hashes differ.
+   Expected: false = MalpracticeDetected IS reachable *)
+query id: device_id; event(MalpracticeDetected(id)).
 
 (* --- PROCESSES --- *)
 

@@ -1,142 +1,128 @@
-(* --- TYPES (Declared only once) --- *)
+(* ============================================================
+    NEGATIVE TEST: neg_election_recovery.pv
+    Source  : election_recovery_master.pv  (G12, G14, G15)
+    Break   : The MalpracticeDetected event is removed from
+              processJudge. The TriggerRepoll and DeviceRevoked
+              events still fire, but MalpracticeDetected does not.
+              Original:
+                event MalpracticeDetected(id);
+                event DeviceRevoked(id);
+                insert RevocationList(id);
+                event TriggerRepoll(id)
+              Here the MalpracticeDetected line is removed.
+    Expected: RESULT event(TriggerRepoll(id)) ==>
+                     event(MalpracticeDetected(id)) is FALSE.
+              ProVerif must find an attack: TriggerRepoll fires
+              but no MalpracticeDetected event precedes it,
+              breaking the G15 causal chain that ensures a
+              re-poll is only triggered after proven malpractice.
+   ============================================================ *)
+
 type skey. type pkey. type vote. type seed.
 type device_id. type tally_proof.
 
-(* --- CHANNELS --- *)
 free ch_pub: channel.
 free ch_judge: channel.
 free ch_voter_bmd: channel [private].
 
-(* --- CRYPTO PRIMITIVES --- *)
 fun pk(skey): pkey.
 
-(* 1. Encryption *)
 fun enc(vote, pkey, seed): bitstring.
 reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
 
-(* 2. Hardware Signatures (TPM) *)
 fun hw_sign(bitstring, skey): bitstring.
 reduc forall m: bitstring, k: skey; check_hw(hw_sign(m, k), pk(k)) = m.
 
-(* 3. Zero-Knowledge Proof of Tally *)
 fun prove_tally(bitstring, vote, skey): tally_proof.
 reduc forall b: bitstring, v: vote, k: skey;
       verify_tally(prove_tally(b, v, k), b, v, pk(k)) = true.
 
-(* --- CONSTANTS & EVENTS --- *)
 const V1, V2: vote.
 
 event VoterCasts(device_id, vote).
 event BB_Published(device_id, bitstring).
-event TallyConfirmed(vote). 
-
-(* G12: Provenance — every ballot published on the BB was cast by a registered device *)
+event TallyConfirmed(vote).
 event BMD_Registered(device_id).
 
-(* ACCOUNTABILITY EVENTS (G14 & G15) *)
 event MalpracticeDetected(device_id).
-event DeviceRevoked(device_id). 
-event TriggerRepoll(device_id). (* Localized Recovery Logic *)
+event DeviceRevoked(device_id).
+event TriggerRepoll(device_id).
 
-(* --- TABLES --- *)
-table BulletinBoard(device_id, bitstring, bitstring). (* ID, Ballot, Signature *)
+table BulletinBoard(device_id, bitstring, bitstring).
 table RevocationList(device_id).
 
 (* --- QUERIES --- *)
 
-(* GOAL G12: Provenance
-   Every ballot published on the Bulletin Board must originate from a registered BMD device. *)
+(* G12 — should still hold *)
 query id: device_id, b: bitstring;
       event(BB_Published(id, b)) ==> event(BMD_Registered(id)).
 
-(* GOAL G15: Recovery 
-   If a re-poll is triggered, it's because malpractice was detected at that device. *)
-query id: device_id; 
+(* G15 — EXPECTED TO FAIL: TriggerRepoll fires without
+   MalpracticeDetected having fired first. *)
+query id: device_id;
       event(TriggerRepoll(id)) ==> event(MalpracticeDetected(id)).
 
-(* GOAL G15 (secondary): Universal Verifiability
-   Confirmed tally results must correspond to an honest voter's intent. *)
-query v: vote, id: device_id; 
+(* G15b — should still hold *)
+query v: vote, id: device_id;
       event(TallyConfirmed(v)) ==> event(VoterCasts(id, v)).
 
-(* GOAL G14: Reachability of Revocation 
-   Does the dispute path actually work? (Expected: FALSE/Found trace) *)
+(* G14 reachability *)
 query id: device_id; event(DeviceRevoked(id)).
 
 (* --- PROCESSES --- *)
 
-(* 1. The Judge: The heart of localized recovery *)
 let processJudge(pk_tpm: pkey) =
     in(ch_judge, (id: device_id, ballot: bitstring, receipt: bitstring));
-    
-    (* Verify hardware receipt provenance *)
     if check_hw(receipt, pk_tpm) = ballot then
     (
-        (* Check if the ballot is missing from the public board *)
         get BulletinBoard(=id, =ballot, sig) in
-            0 (* Found: Admin is honest *)
+            0
         else
-            (* Not Found: Malpractice proven! *)
             (
-                event MalpracticeDetected(id);
+                (* BREAK: event MalpracticeDetected(id) removed *)
                 event DeviceRevoked(id);
                 insert RevocationList(id);
-                (* G15: Recovery via authorized Re-poll *)
                 event TriggerRepoll(id)
             )
     ).
 
-(* 2. The BMD: Secure hardware producing a receipt *)
 let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey, v: vote) =
-    (* G12: Register this device on the system before casting *)
     event BMD_Registered(id);
     event VoterCasts(id, v);
     new s: seed;
     let ballot = enc(v, pk_elect, s) in
     let receipt = hw_sign(ballot, sk_tpm) in
-    
-    (* Hand receipt to voter privately *)
     out(ch_voter_bmd, (ballot, receipt));
-    
-    (* Send to Bulletin Board (In failure scenario, this is dropped) *)
     event BB_Published(id, ballot);
     out(ch_pub, (id, ballot, receipt)).
 
-(* 3. The Auditor/Public: Universal Audit *)
 let processAuditor(pk_elect: pkey) =
     in(ch_pub, (id: device_id, ballot: bitstring, result_v: vote, p: tally_proof));
-    (* Only accept results from non-revoked devices *)
     get RevocationList(=id) in 0 else
     (
         if verify_tally(p, ballot, result_v, pk_elect) = true then
           event TallyConfirmed(result_v)
     ).
 
-(* --- MAIN SYSTEM --- *)
 process
     new sk_elect: skey; let pk_elect = pk(sk_elect) in
     new sk_tpm1: skey;  let pk_tpm1 = pk(sk_tpm1) in
     new sk_tpm2: skey;  let pk_tpm2 = pk(sk_tpm2) in
     new id1: device_id; new id2: device_id;
-    
+
     out(ch_pub, (pk_elect, pk_tpm1, pk_tpm2, id1, id2));
 
     (
-        (* BOOTH 1: HONEST *)
         processBMD(id1, sk_tpm1, pk_elect, V1) |
-        
-        (* BOOTH 2: MALPRACTICE (Admin drops the ballot, Voter triggers Judge) *)
+
         (
             processBMD(id2, sk_tpm2, pk_elect, V2) |
             in(ch_voter_bmd, (b: bitstring, r: bitstring));
-            (* Voter observes ballot is missing from PBB and goes to Judge *)
-            out(ch_judge, (id2, b, r)) 
+            out(ch_judge, (id2, b, r))
         ) |
 
-        (* SYSTEM LOGIC *)
         processJudge(pk_tpm2) |
-        
-        (* TALLYING AUTHORITY *)
+
         ! (
             in(ch_pub, (id: device_id, b: bitstring, r: bitstring));
             if (check_hw(r, pk_tpm1) = b) || (check_hw(r, pk_tpm2) = b) then
@@ -147,7 +133,6 @@ process
                 out(ch_pub, (id, b, res_v, p))
             )
         ) |
-        
-        (* PUBLIC AUDITOR *)
+
         processAuditor(pk_elect)
     )

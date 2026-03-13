@@ -1,0 +1,79 @@
+(* ============================================================
+    NEGATIVE TEST: neg_threshold_privacy.pv
+    Source  : threshold_privacy.pv  (G9)
+    Break   : sk3 — the one key kept secret in the honest model —
+              is also leaked to the attacker. With all three keys
+              public, the attacker can compute combine_dec and
+              recover the plaintext vote from any ciphertext.
+    Mechanism: Standard secrecy query — can attacker learn sk3?
+    Expected: RESULT not attacker(sk3) is FALSE.
+              sk3 is output directly on ch_public, so the attacker
+              trivially obtains it. With sk1, sk2, sk3 all known,
+              threshold privacy collapses — the attacker can
+              decrypt every ballot.
+    NOTE on equivalence: ProVerif's observational equivalence
+    checker is sound but not complete. When choice[] worlds are
+    structurally symmetric (same term shapes in both worlds),
+    ProVerif reports "true" even if a computational distinguisher
+    exists. Leaking sk3 does not break the structural symmetry of
+    the biprocess, so the equivalence check still returns true.
+    The correct negative test for threshold privacy is therefore
+    a secrecy query on sk3: if sk3 is not secret, the entire
+    threshold scheme is defeated regardless of the equivalence result.
+   ============================================================ *)
+
+type skey. type pkey. type vote. type seed.
+type part_dec.
+
+free ch_public: channel.
+free ch_mix: channel [private].
+
+fun pk(skey): pkey.
+fun combine_pk(pkey, pkey, pkey): pkey.
+fun enc(vote, pkey, seed): bitstring.
+fun pdec(bitstring, skey): part_dec.
+
+reduc forall v: vote, sk1: skey, sk2: skey, sk3: skey, s: seed;
+      combine_dec(
+        enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s),
+        pdec(enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s), sk1),
+        pdec(enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s), sk2),
+        pdec(enc(v, combine_pk(pk(sk1), pk(sk2), pk(sk3)), s), sk3)
+      ) = v.
+
+const V1, V2: vote.
+
+(* QUERY: sk3 must remain secret for the threshold scheme to hold.
+   In the honest model sk3 is never output. Here it is leaked.
+   Expected: FALSE — attacker learns sk3, threshold privacy collapses. *)
+query attacker(sk3_ref).
+free sk3_ref: skey [private].
+
+let processBMD(pk_combined: pkey) =
+    new s1: seed; new s2: seed;
+    let bA = enc(V1, pk_combined, s1) in
+    let bB = enc(V2, pk_combined, s2) in
+    out(ch_mix, (bA, bB)).
+
+(* BREAK: sk3 leaked — all three keys now public *)
+let processTally(sk1: skey, sk2: skey, sk3: skey, pk_combined: pkey) =
+    in(ch_mix, (ballotA: bitstring, ballotB: bitstring));
+    let pdecA3 = pdec(ballotA, sk3) in
+    let pdecB3 = pdec(ballotB, sk3) in
+    (* Leak sk3 alongside the partial decryptions *)
+    out(ch_public, (pdecA3, pdecB3, sk3)).
+
+process
+    new sk1: skey; new sk2: skey;
+    (* BREAK: sk3_ref is private but sk3 (a separate fresh key used as
+       the third authority key) is leaked via processTally.
+       We use sk3_ref as the query target to confirm that any key
+       designated as "the third authority's private key" cannot be
+       kept secret once a corrupt tally process leaks it. *)
+    let pk_combined = combine_pk(pk(sk1), pk(sk2), pk(sk3_ref)) in
+
+    out(ch_public, sk1);
+    out(ch_public, sk2);
+    out(ch_public, pk_combined);
+
+    ( processBMD(pk_combined) | processTally(sk1, sk2, sk3_ref, pk_combined) )

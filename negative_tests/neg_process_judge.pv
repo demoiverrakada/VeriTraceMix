@@ -1,0 +1,103 @@
+(* ============================================================
+    NEGATIVE TEST: neg_process_judge.pv
+    Source  : process_judge.pv  (G1, G2, G3)
+    Break   : The DisputeStarted event is removed from
+              processJudge. The original code fires:
+                event DisputeStarted(id); ...
+                event JudgeRulesAgainstAdmin(id)
+              Without DisputeStarted, JudgeRulesAgainstAdmin
+              can fire with nothing preceding it in the trace,
+              breaking the G3 causal chain.
+    Expected: RESULT event(JudgeRulesAgainstAdmin(id)) ==>
+                     event(DisputeStarted(id)) is FALSE.
+              ProVerif must find an attack trace where
+              JudgeRulesAgainstAdmin fires but DisputeStarted
+              never does.
+   ============================================================ *)
+
+type device_id. type skey. type pkey. type vote. type seed.
+
+(* --- CHANNELS --- *)
+free ch_judge: channel.
+free ch_voter_bmd: channel [private].
+free ch_pub: channel.
+free ch_ui: channel.
+
+(* --- CRYPTO --- *)
+fun pk(skey): pkey.
+fun enc(vote, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed; dec(enc(v, pk(k), s), k) = v.
+
+fun sign_receipt(bitstring, bitstring, skey): bitstring.
+reduc forall b: bitstring, s: bitstring, k: skey;
+      verify_receipt(sign_receipt(b, s, k), pk(k)) = (b, s).
+
+const V1: vote.
+
+(* --- EVENTS --- *)
+event VoterIntent(vote).
+event VoterVerifiesReceipt(vote).
+event VoterConfirmedOnBB(device_id).
+event DisputeStarted(device_id).
+event JudgeRulesAgainstAdmin(device_id).
+event BB_Published(bitstring, device_id).
+
+(* --- QUERIES --- *)
+
+(* G1 — should still hold *)
+query v: vote;
+      event(VoterVerifiesReceipt(v)) ==> event(VoterIntent(v)).
+
+(* G2 reachability — should still hold *)
+query id: device_id; event(VoterConfirmedOnBB(id)).
+
+(* G3 — EXPECTED TO FAIL: without event DisputeStarted(id) firing
+   before JudgeRulesAgainstAdmin, the causal chain is broken.
+   ProVerif will find a trace where JudgeRulesAgainstAdmin fires
+   but DisputeStarted never does. *)
+query id: device_id;
+      event(JudgeRulesAgainstAdmin(id)) ==> event(DisputeStarted(id)).
+
+(* --- PROCESSES --- *)
+
+let processJudge(pk_tpm: pkey) =
+    in(ch_judge, (id: device_id, ballot: bitstring, session_id: bitstring, receipt: bitstring));
+    let (r_ballot: bitstring, r_session: bitstring) = verify_receipt(receipt, pk_tpm) in
+    if r_ballot = ballot then
+    (
+        (* BREAK: event DisputeStarted(id) removed from here *)
+        in(ch_pub, (=id, published_ballot: bitstring));
+        if published_ballot = ballot then 0
+        else event JudgeRulesAgainstAdmin(id)
+    ).
+
+let processBMD(id: device_id, sk_tpm: skey, pk_elect: pkey) =
+    in(ch_ui, v: vote);
+    new session_id: bitstring; new s: seed;
+    let ballot = enc(v, pk_elect, s) in
+    let receipt = sign_receipt(ballot, session_id, sk_tpm) in
+    out(ch_voter_bmd, (ballot, session_id, receipt));
+    event BB_Published(ballot, id);
+    out(ch_pub, (id, ballot)).
+
+let processVoter(id: device_id, pk_tpm: pkey, my_intent: vote) =
+    event VoterIntent(my_intent);
+    out(ch_ui, my_intent);
+    in(ch_voter_bmd, (ballot: bitstring, sess: bitstring, receipt: bitstring));
+    let (v_ballot: bitstring, v_sess: bitstring) = verify_receipt(receipt, pk_tpm) in
+    if v_ballot = ballot then
+    (
+        event VoterVerifiesReceipt(my_intent);
+        in(ch_pub, (=id, pbb_ballot: bitstring));
+        if pbb_ballot = ballot then
+            event VoterConfirmedOnBB(id)
+        else
+            out(ch_judge, (id, ballot, sess, receipt))
+    ).
+
+process
+    new sk_tpm: skey;   let pk_tpm = pk(sk_tpm) in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    new dev1: device_id;
+
+    ( processJudge(pk_tpm) | processBMD(dev1, sk_tpm, pk_elect) | processVoter(dev1, pk_tpm, V1) )
