@@ -6,7 +6,7 @@
 
 ## 📌 Project Overview
 
-This repository contains the formal verification of **VeriTraceMix**, an end-to-end (E2E) verifiable electronic voting protocol. The protocol is designed to address the critical tension between **Voter Privacy** and **System Accountability**.
+This repository contains the formal verification of **OpenVoting+**, an end-to-end (E2E) verifiable electronic voting protocol. The protocol is designed to address the critical tension between **Voter Privacy** and **System Accountability**.
 
 Using **Applied Pi-Calculus** and the **ProVerif** automated reasoning tool, this project rigorously models the voting lifecycle and proves its resilience against a Dolev-Yao adversary. The model specifically focuses on hardware-assisted security using **Trusted Execution Environments (TEEs/TPMs)**.
 
