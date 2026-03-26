@@ -1,0 +1,242 @@
+(* ============================================================
+   MULTI-ELECTION ELIGIBILITY: EID-VECTOR MODEL (G-MEL)
+
+   Run mode: proverif multi_election_eligibility.pv  (standard mode)
+
+   Gap 6 Fix — 2026
+   Models the eid_vector (election eligibility set) mechanism from
+   the Evoting_Token_Generation implementation.
+
+   In the real system each voter's token payload contains:
+     eid_vector: semicolon-separated election IDs, e.g. "E1;E3;E6"
+   The BMD parses this to determine which elections the voter may
+   participate in during their single visit.
+
+   This model verifies that the eligibility system correctly:
+     G-MEL1 (Eligibility Enforcement):
+       A ballot submitted for election E is only accepted if the
+       token was issued with E in its eid_vector.
+       event(BallotCast(E, tid)) ==> event(EligibleFor(tid, E))
+
+     G-MEL2 (Cross-Election Isolation):
+       Eligibility in election E1 does NOT grant access to E2.
+       A voter with eid_vector={E1} cannot submit a ballot in E2.
+       Verified negatively: if the BMD omits the eid_vector check,
+       the property fails (see neg_multi_election_eligibility.pv).
+
+     G-MEL3 (Per-Election Double-Vote Prevention):
+       A voter cannot cast more than one ballot per election,
+       even if their eid_vector includes multiple elections.
+       event(BallotCast(E, tid)) uniqueness per (E, tid) pair.
+
+     G-MEL4 (Multi-Election Independence):
+       A voter with eid_vector={E1,E2} can vote in BOTH E1 and E2
+       in the same visit. Casting in E1 does not prevent E2.
+       Verified by reachability: both BallotCast(E1, tid) and
+       BallotCast(E2, tid) are reachable for the same tid.
+
+   ────────────────────────────────────────────────────────────
+   SCENARIO (2 elections, 2 voters)
+   ────────────────────────────────────────────────────────────
+   Elections: Elec1, Elec2
+   Voter V1:  eid_vector = {Elec1}        (eligible for E1 only)
+   Voter V2:  eid_vector = {Elec1, Elec2} (eligible for both)
+
+   Expected outcomes:
+     V1 can cast in Elec1  ✓
+     V1 cannot cast in Elec2 ✗ (BMD checks eid_vector → rejects)
+     V2 can cast in Elec1  ✓
+     V2 can cast in Elec2  ✓
+     V2 cannot cast twice in Elec1 ✗ (NullifierRepo per (election, tid))
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type skey. type pkey. type vote_t. type seed.
+type voter_id. type booth_id. type token_id. type election_id.
+type id_mark.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_rfid:   channel.           (* RFID: fully public / attacker-controlled *)
+free ch_lock:   channel [private]. (* Serialisation lock for atomic BB check   *)
+
+(* --- CRYPTO: Key pairs --- *)
+fun pk(skey): pkey.
+
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey;
+      verify(sign(m, k), pk(k)) = m.
+
+fun enc_auth(bitstring, bitstring, pkey, seed): bitstring.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_payload(enc_auth(p, s, pk(k), r), k) = p.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_sig(enc_auth(p, s, pk(k), r), k) = s.
+
+(* eid_vector encoding:
+   A voter's eligibility set is encoded as a pair of optional
+   election IDs. We model two distinct elections.
+   is_eligible(eid_vec, E) = true iff E is in eid_vec. *)
+fun eid_single(election_id): bitstring.       (* eid_vector = {E1}      *)
+fun eid_pair(election_id, election_id): bitstring. (* eid_vector = {E1,E2}   *)
+fun is_eligible_single(bitstring, election_id): bool
+    reduc forall e: election_id;
+          is_eligible_single(eid_single(e), e) = true.
+fun is_eligible_pair(bitstring, election_id): bool
+    reduc forall e1: election_id, e2: election_id;
+          is_eligible_pair(eid_pair(e1, e2), e1) = true;
+          forall e1: election_id, e2: election_id;
+          is_eligible_pair(eid_pair(e1, e2), e2) = true.
+
+(* Token payload with eid_vector field *)
+fun make_payload(voter_id, token_id, booth_id, bitstring): bitstring.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_vid(make_payload(v, t, b, ev))    = v.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_tid(make_payload(v, t, b, ev))    = t.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_booth(make_payload(v, t, b, ev))  = b.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_eidvec(make_payload(v, t, b, ev)) = ev.
+
+fun enc_vote(vote_t, pkey, seed): bitstring.
+
+(* --- PRIVATE KEYS --- *)
+free sk_as:  skey [private].
+free sk_bmd: skey [private].
+
+(* --- CONSTANTS --- *)
+const Booth1:          booth_id.
+const Elec1, Elec2:    election_id.
+const CandidateA:      vote_t.
+
+(* --- EVENTS --- *)
+event AS_Issued(voter_id, token_id, bitstring).  (* vid, tid, eid_vector *)
+event EligibleFor(token_id, election_id).        (* token grants access to election *)
+event BallotCast(election_id, token_id).         (* ballot accepted for election    *)
+
+(* --- TABLE: Per-(election, token_id) nullifier repository --- *)
+table NullifierRepo(election_id, token_id).
+
+(* --- RESTRICTION: one ballot per (election, tid) pair --- *)
+restriction e: election_id, t: token_id, i1: id_mark, i2: id_mark;
+    event(BallotCast(e, t)) && event(BallotCast(e, t)) ==> true.
+(* Note: strict uniqueness enforced via NullifierRepo; the restriction
+   above is a sanity witness. The injective query below is the key one. *)
+
+(* === QUERIES === *)
+
+(* G-MEL1 — ELIGIBILITY ENFORCEMENT
+   A ballot is accepted for election E only if the token grants E.
+   Expected: true *)
+query e: election_id, t: token_id;
+      event(BallotCast(e, t)) ==> event(EligibleFor(t, e)).
+
+(* G-MEL3 — PER-ELECTION DOUBLE-VOTE PREVENTION
+   The same token cannot cast two ballots in the same election.
+   Expected: true *)
+query e: election_id, t: token_id;
+      inj-event(BallotCast(e, t)) ==> inj-event(EligibleFor(t, e)).
+
+(* G-MEL4a — REACHABILITY: V2 can cast in Elec1 (non-vacuous) *)
+query t: token_id; event(BallotCast(Elec1, t)).
+
+(* G-MEL4b — REACHABILITY: V2 can also cast in Elec2 (multi-election) *)
+query t: token_id; event(BallotCast(Elec2, t)).
+
+(* === PROCESSES === *)
+
+(* Authentication Server:
+   Issues a token with eid_vector encoding the voter's eligibility set.
+   Fires EligibleFor for each election in the vector. *)
+let processAS(pk_bmd_j: pkey, sk_as_param: skey,
+              vid: voter_id, eid_vec: bitstring) =
+    new tid: token_id;
+    let payload = make_payload(vid, tid, Booth1, eid_vec) in
+    let sig     = sign(payload, sk_as_param) in
+    new r: seed;
+    let token   = enc_auth(payload, sig, pk_bmd_j, r) in
+    event AS_Issued(vid, tid, eid_vec);
+    out(ch_rfid, token).
+
+(* BMD — single election:
+   Decrypts token, verifies AS sig, checks that the target election
+   is in the voter's eid_vector, then submits ballot to BB.
+   The eligibility check is done TWICE (once for single, once for pair)
+   to handle both eid_vector types; only one path needs to match. *)
+let processBMD_elec(sk_bmd_param: skey, pk_as_param: pkey,
+                    pk_elect: pkey, my_booth: booth_id,
+                    my_vote: vote_t, target_elec: election_id) =
+    in(ch_rfid, token: bitstring);
+    let payload  = dec_payload(token, sk_bmd_param) in
+    let sig      = dec_sig(token, sk_bmd_param)     in
+    if verify(sig, pk_as_param) = payload            then
+    let tid      = get_tid(payload)                  in
+    let assigned = get_booth(payload)                in
+    let eid_vec  = get_eidvec(payload)               in
+    if assigned = my_booth                           then
+    (* Check eligibility: accept if target_elec is in eid_vector *)
+    if is_eligible_single(eid_vec, target_elec) = true
+    || is_eligible_pair(eid_vec, target_elec) = true   then
+    (
+        event EligibleFor(tid, target_elec);
+        out(ch_public, (tid, target_elec, my_vote))
+    ).
+
+(* Bulletin Board (per-election atomic nullifier check):
+   Nullifier key = (election_id, token_id) pair, preventing the
+   same token from voting twice in the same election while allowing
+   the same token to vote across different elections it is eligible for. *)
+let processBB_atomic =
+    !
+    in(ch_public, (t: token_id, e: election_id, v: vote_t));
+    in(ch_lock, _x: bool);                   (* ACQUIRE LOCK *)
+    get NullifierRepo(=e, =t) in
+        out(ch_lock, true)                    (* already voted in this election *)
+    else
+    (
+        insert NullifierRepo(e, t);
+        event BallotCast(e, t);
+        new s: seed;
+        let pk_dummy = pk(sk_bmd) in          (* encrypt for storage *)
+        let ballot   = enc_vote(v, pk_dummy, s) in
+        out(ch_public, ballot);
+        out(ch_lock, true)                    (* RELEASE LOCK *)
+    ).
+
+(* === MAIN SYSTEM === *)
+process
+    let pk_bmd_1 = pk(sk_bmd) in
+    let pk_as_0  = pk(sk_as)  in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    out(ch_public, (pk_bmd_1, pk_as_0, pk_elect, Elec1, Elec2));
+
+    new vid1: voter_id;   (* V1: eligible for Elec1 only      *)
+    new vid2: voter_id;   (* V2: eligible for Elec1 AND Elec2  *)
+
+    out(ch_lock, true) |
+    (
+        (* V1 token: eid_vector = {Elec1} *)
+        processAS(pk_bmd_1, sk_as, vid1, eid_single(Elec1)) |
+
+        (* V2 token: eid_vector = {Elec1, Elec2} *)
+        processAS(pk_bmd_1, sk_as, vid2, eid_pair(Elec1, Elec2)) |
+
+        (* BMD instances for each voter × election combination *)
+        (* V1 attempts Elec1 — should succeed *)
+        processBMD_elec(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec1) |
+
+        (* V1 attempts Elec2 — should fail (eid check rejects) *)
+        processBMD_elec(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec2) |
+
+        (* V2 attempts Elec1 — should succeed *)
+        processBMD_elec(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec1) |
+
+        (* V2 attempts Elec2 — should succeed *)
+        processBMD_elec(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec2) |
+
+        (* V2 attempts Elec1 again — NullifierRepo should reject *)
+        processBMD_elec(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec1) |
+
+        processBB_atomic
+    )

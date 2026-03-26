@@ -1,0 +1,168 @@
+(* ============================================================
+   TRACEABLE MIXNET: ANONYMITY PRESERVED UNDER JUDGE TRACING (G-TANON)
+
+   Run mode: proverif traceable_anonymity.pv
+   (ProVerif 2.05 auto-detects choice[] and switches to equivalence mode)
+
+   Gap 2 Fix — 2026
+   This file proves the COEXISTENCE of traceability and anonymity —
+   the core cryptographic contribution of our traceable mixnet design
+   over plain OpenVoting:
+
+     "Even when the judge successfully traces voter A's ballot and
+      learns which output ciphertext corresponds to A, voter B's
+      vote remains perfectly hidden from any adversary."
+
+   ────────────────────────────────────────────────────────────
+   WHY THIS PROPERTY IS NON-TRIVIAL
+   ────────────────────────────────────────────────────────────
+   A naive trace table published publicly would immediately break
+   anonymity: seeing (tag_A → bA_out) and (tag_B → bB_out) lets
+   the attacker map every voter to their output ciphertext, and
+   hence to their decrypted vote after tallying.
+
+   Our design prevents this by:
+     1. The trace table is PRIVATE (modelled as a private channel).
+        Only a judge process with a valid warrant can query it.
+     2. The judge traces ONLY voter A (single warrant).
+        Voter B's trace entry stays unexposed.
+     3. Voter A's vote is FIXED as V1 in both worlds of the
+        bi-process, so the judge's observation (bA_out) is
+        IDENTICAL in both worlds — the trace gives the attacker
+        zero distinguishing power over B.
+     4. Voter B's re-encrypted ciphertext is choice[V2,V1],
+        which, without sk_elect, is indistinguishable.
+
+   ────────────────────────────────────────────────────────────
+   BI-PROCESS CONSTRUCTION (choice[])
+   ────────────────────────────────────────────────────────────
+     World 0: Voter A casts V1,           Voter B casts V2
+     World 1: Voter A casts V1 (same),    Voter B casts V1
+
+   Voter A's vote is FIXED as V1 in both worlds. The judge traces
+   A and learns bA_out = re_enc(enc(V1,...)), which is the same
+   term in both worlds — no information leak from the trace.
+
+   Voter B's vote is choice[V2, V1]. The attacker observes the
+   shuffled public output {bA_out, bB_out} and knows bA_out (from
+   the judge's output). They therefore know bB_out by exclusion.
+   The question is: can they tell whether bB_out encrypts V2 or V1?
+   Since enc and re_enc are black-box without sk_elect, they cannot.
+
+   Expected result: RESULT Observational equivalence is true.
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed. type tag_t.
+
+(* --- CHANNELS --- *)
+free ch_pub:     channel.           (* Public: shuffled ballots, judge output  *)
+free ch_submit:  channel.           (* Voters submit (ballot, tag) to mix      *)
+free ch_receipt: channel [private]. (* Voter A gives her tag to judge privately *)
+free ch_trace:   channel [private]. (* Mix → Judge: private trace table        *)
+
+(* --- CRYPTO PRIMITIVES --- *)
+fun pk(skey): pkey.
+
+(* Probabilistic encryption + re-encryption (models ElGamal/Paillier) *)
+fun enc(vote, pkey, seed): bitstring.
+fun re_enc(bitstring, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed;
+      dec(enc(v, pk(k), s), k) = v;
+      forall v: vote, k: skey, s: seed, s2: seed;
+      dec(re_enc(enc(v, pk(k), s), pk(k), s2), k) = v.
+
+(* Trace tag: voter signs their ballot to create a unique receipt.
+   Only the holder of sk_v can produce make_tag(b, sk_v).
+   verify_tag lets anyone check the tag against the voter's pk. *)
+fun make_tag(bitstring, skey): tag_t.
+reduc forall b: bitstring, k: skey;
+      verify_tag(make_tag(b, k), pk(k)) = b.
+
+(* --- ELECTION PRIVATE KEY (not given to attacker) --- *)
+free sk_elect: skey [private].
+
+(* --- CONSTANTS --- *)
+const V1, V2: vote.
+
+(* --- EVENTS --- *)
+event JudgeTracedA(bitstring).   (* Judge found and published voter A's output *)
+
+(* === QUERIES ===
+   The observational equivalence property is implicit in the
+   choice[] operators below. ProVerif checks that no sequence of
+   attacker observations distinguishes the two worlds.
+   We add a reachability guard to ensure the judge actually fires. *)
+query b: bitstring; event(JudgeTracedA(b)).
+
+(* === PROCESSES === *)
+
+(* Voter A: casts V1 in BOTH worlds (A's vote is not the secret).
+   Sends (ballot, trace_tag) to the mix. Gives trace_tag to the
+   judge on a PRIVATE receipt channel (models handing over her
+   physical receipt for a warrant). *)
+let processVoterA(sk_vA: skey, pk_elect_param: pkey) =
+    new s: seed;
+    let ballot_A = enc(V1, pk_elect_param, s) in
+    let tag_A    = make_tag(ballot_A, sk_vA) in
+    out(ch_submit, (ballot_A, tag_A));
+    out(ch_receipt, tag_A).          (* Hand receipt to judge (private channel) *)
+
+(* Voter B: casts choice[V2, V1] — THIS is the anonymity secret.
+   In world 0 B votes V2; in world 1 B votes V1.
+   The attacker must not be able to tell the worlds apart. *)
+let processVoterB(sk_vB: skey, pk_elect_param: pkey) =
+    new s: seed;
+    let ballot_B = enc(choice[V2, V1], pk_elect_param, s) in
+    let tag_B    = make_tag(ballot_B, sk_vB) in
+    out(ch_submit, (ballot_B, tag_B)).
+
+(* Mix Node (single honest server — sufficient for anonymity proof):
+   1. Collects exactly two (ballot, tag) pairs from ch_submit.
+   2. Re-encrypts each ballot with a fresh seed (changes ciphertext).
+   3. Publishes shuffled output in PARALLEL on ch_pub (hides order).
+   4. Sends (tag → output_ciphertext) on the PRIVATE ch_trace
+      so only the judge process can retrieve it. *)
+let processMixNode(pk_elect_param: pkey) =
+    in(ch_submit, (bA: bitstring, tA: tag_t));
+    in(ch_submit, (bB: bitstring, tB: tag_t));
+    new s1: seed; new s2: seed;
+    let bA_out = re_enc(bA, pk_elect_param, s1) in
+    let bB_out = re_enc(bB, pk_elect_param, s2) in
+    (* Public: shuffled ciphertexts (parallel = order hidden) *)
+    ( out(ch_pub, bA_out) | out(ch_pub, bB_out) ) |
+    (* Private trace table — only judge can query *)
+    ( out(ch_trace, (tA, bA_out)) |
+      out(ch_trace, (tB, bB_out)) ).
+
+(* Judge (warrant for voter A only):
+   1. Receives voter A's tag from the private receipt channel.
+   2. Scans the private trace channel looking for A's tag entry.
+   3. Fires JudgeTracedA(bA_out) and publishes bA_out publicly —
+      models a public warrant result (judge announces which
+      output ciphertext belongs to A).
+   Note: judge only asks about A; B's trace entry stays private. *)
+let processJudge =
+    in(ch_receipt, tag_A: tag_t);          (* Get A's tag from her receipt *)
+    in(ch_trace,   (tX: tag_t, bX: bitstring));  (* Scan trace table        *)
+    if tX = tag_A then
+    (
+        event JudgeTracedA(bX);
+        out(ch_pub, bX)                    (* Publish trace result publicly  *)
+    ).
+
+(* === MAIN SYSTEM === *)
+process
+    let pk_elect_pub = pk(sk_elect) in
+    out(ch_pub, pk_elect_pub);
+
+    new sk_vA: skey; new sk_vB: skey;
+    (* Both voter public keys are known to the attacker *)
+    out(ch_pub, (pk(sk_vA), pk(sk_vB)));
+
+    (
+        processVoterA(sk_vA, pk_elect_pub) |
+        processVoterB(sk_vB, pk_elect_pub) |
+        processMixNode(pk_elect_pub)        |
+        processJudge
+    )

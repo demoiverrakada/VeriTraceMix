@@ -2,7 +2,17 @@
 
 # =============================================================================
 # VeriTraceMix — ProVerif Verification Suite
-# Covers security goals G1–G15 of the OpenVoting+ protocol.
+# Covers security goals G1–G15 + G-TB, G-TANON, G-TRACE, G-IRV, G-MEL
+# of the OpenVoting+ protocol.
+#
+# 2026 Gap Fixes:
+#   Gap 1 — voter_eligibility.pv:      RSA-OAEP token (replaces ZKP cred)
+#   Gap 2 — traceable_anonymity.pv:    Anonymity preserved under judge tracing
+#            traceability.pv:           Judge CAN trace (soundness & completeness)
+#   Gap 3 — irv_tally.pv:             IRV redistribution soundness
+#   Gap 4 — (documented) Tally correctness out of ProVerif scope (see README)
+#   Gap 5 — (documented) Bounded hash chain model (see README)
+#   Gap 6 — multi_election_eligibility.pv: eid_vector multi-election model
 #
 # Compatible with: bash 3.2+ (macOS default), bash 4/5, Linux
 # Tested with   : ProVerif 2.05
@@ -50,22 +60,31 @@ ERRORS=0
 # =============================================================================
 goal_for_file() {
     case "$1" in
-        process_judge.pv)              echo "G1, G2, G3  — Individual Verifiability" ;;
-        voter_eligibility.pv)          echo "G5, G6, G11 — Eligibility, Uniqueness & Key Secrecy" ;;
-        privacy_secrecy.pv)            echo "G7          — Ballot Secrecy" ;;
-        privacy.pv)                    echo "G8          — Anonymity (observational equivalence)" ;;
-        platform_integrity.pv)         echo "G10, G11    — Platform Integrity & Key Secrecy" ;;
-        secure_transport.pv)           echo "G13         — Transport Integrity & Attack Detection" ;;
-        threshold_privacy.pv)          echo "G9          — Threshold Privacy (n-1 corruption)" ;;
-        election_recovery_master.pv)   echo "G12, G14, G15 — Provenance, Revocation & Recovery" ;;
-        neg_process_judge.pv)          echo "NEG/G3      — Removed DisputeStarted event" ;;
-        neg_voter_eligibility.pv)      echo "NEG/G6      — Removed nullifier uniqueness check" ;;
-        neg_privacy.pv)                echo "NEG/G8      — Leaked voter signing key" ;;
-        neg_platform_integrity.pv)     echo "NEG/G10     — Removed OS identity check" ;;
-        neg_secure_transport.pv)       echo "NEG/G13     — Removed hash comparison" ;;
-        neg_threshold_privacy.pv)      echo "NEG/G9      — Leaked third authority key sk3" ;;
-        neg_election_recovery.pv)      echo "NEG/G15     — Removed MalpracticeDetected event" ;;
-        *)                             echo "Unknown goals" ;;
+        process_judge.pv)                   echo "G1, G2, G3       — Individual Verifiability" ;;
+        voter_eligibility.pv)               echo "G5, G6, G11      — Eligibility, Uniqueness & Key Secrecy [Gap1]" ;;
+        privacy_secrecy.pv)                 echo "G7               — Ballot Secrecy" ;;
+        privacy.pv)                         echo "G8               — Anonymity (observational equivalence)" ;;
+        platform_integrity.pv)              echo "G10, G11         — Platform Integrity & Key Secrecy" ;;
+        secure_transport.pv)                echo "G13              — Transport Integrity (bounded 2-vote model) [Gap5]" ;;
+        threshold_privacy.pv)               echo "G9               — Threshold Privacy (n-1 corruption)" ;;
+        election_recovery_master.pv)        echo "G12, G14, G15    — Provenance, Revocation & Recovery" ;;
+        token_booth_binding.pv)             echo "G-TB             — Token Booth-Binding Provenance" ;;
+        traceable_anonymity.pv)             echo "G-TANON          — Anonymity Under Judge Tracing [Gap2]" ;;
+        traceability.pv)                    echo "G-TRACE          — Judge Can Trace (Soundness+Completeness) [Gap2]" ;;
+        irv_tally.pv)                       echo "G-IRV            — IRV Redistribution Soundness [Gap3]" ;;
+        multi_election_eligibility.pv)      echo "G-MEL            — Multi-Election Eligibility (eid_vector) [Gap6]" ;;
+        neg_process_judge.pv)               echo "NEG/G3           — Removed DisputeStarted event" ;;
+        neg_voter_eligibility.pv)           echo "NEG/G6           — Removed nullifier check [Gap1 neg]" ;;
+        neg_privacy.pv)                     echo "NEG/G8           — Leaked voter signing key" ;;
+        neg_platform_integrity.pv)          echo "NEG/G10          — Removed OS identity check" ;;
+        neg_secure_transport.pv)            echo "NEG/G13          — Removed hash comparison" ;;
+        neg_threshold_privacy.pv)           echo "NEG/G9           — Leaked third authority key sk3" ;;
+        neg_election_recovery.pv)           echo "NEG/G15          — Removed MalpracticeDetected event" ;;
+        neg_token_booth_binding.pv)         echo "NEG/G-TB         — Removed AS signature check" ;;
+        neg_traceable_anonymity.pv)         echo "NEG/G-TANON      — Public trace table breaks anonymity [Gap2 neg]" ;;
+        neg_irv_tally.pv)                   echo "NEG/G-IRV        — Eliminated event removed [Gap3 neg]" ;;
+        neg_multi_election_eligibility.pv)  echo "NEG/G-MEL        — eid_vector check removed [Gap6 neg]" ;;
+        *)                                  echo "Unknown goals" ;;
     esac
 }
 
@@ -212,7 +231,8 @@ EOF
 echo ""
 echo -e "${BOLD}=============================================================="
 echo -e "  VeriTraceMix -- OpenVoting+ Formal Verification Suite"
-echo -e "  Security Goals G1-G15  .  ProVerif 2.05 Symbolic Model"
+echo -e "  Goals G1-G15, G-TB, G-TANON, G-TRACE, G-IRV, G-MEL"
+echo -e "  ProVerif 2.05 Symbolic Model  |  2026 Gap Fixes Applied"
 echo -e "==============================================================${NC}"
 echo ""
 echo -e "  All files run in standard ProVerif mode."

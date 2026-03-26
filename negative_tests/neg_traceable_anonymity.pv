@@ -1,0 +1,105 @@
+(* ============================================================
+   NEGATIVE TEST: neg_traceable_anonymity.pv
+   Source  : traceable_anonymity.pv  (G-TANON)
+
+   BREAK: The trace table channel is made PUBLIC instead of private.
+   Without the access-control restriction on the trace table, the
+   Dolev-Yao attacker can directly read ALL trace entries —
+   including the (tag_B → bB_out) entry for voter B.
+   Knowing bB_out, the attacker can distinguish the two worlds
+   (B voted V2 vs V1) by observing the public output.
+
+   Run mode: proverif neg_traceable_anonymity.pv
+   (ProVerif auto-detects choice[] and uses equivalence mode)
+
+   MECHANISM BROKEN:
+     Original:   free ch_trace: channel [private].
+     Broken:     free ch_trace: channel.   (* PUBLIC — attacker reads trace *)
+
+   EXPECTED RESULT:
+     G-TANON: Observational equivalence is FALSE.
+     (The attacker reads (tag_B, bB_out) on the now-public ch_trace.
+      In world 0, bB_out = re_enc(enc(V2,...)) differs syntactically
+      from world 1 bB_out = re_enc(enc(V1,...)) — attack found.)
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type skey. type pkey. type vote. type seed. type tag_t.
+
+(* --- CHANNELS --- *)
+free ch_pub:     channel.
+free ch_submit:  channel.
+free ch_receipt: channel [private].
+free ch_trace:   channel.    (* BREAK: was [private], now PUBLIC — attack enabled *)
+
+(* --- CRYPTO --- *)
+fun pk(skey): pkey.
+fun enc(vote, pkey, seed): bitstring.
+fun re_enc(bitstring, pkey, seed): bitstring.
+reduc forall v: vote, k: skey, s: seed;
+      dec(enc(v, pk(k), s), k) = v;
+      forall v: vote, k: skey, s: seed, s2: seed;
+      dec(re_enc(enc(v, pk(k), s), pk(k), s2), k) = v.
+
+fun make_tag(bitstring, skey): tag_t.
+reduc forall b: bitstring, k: skey;
+      verify_tag(make_tag(b, k), pk(k)) = b.
+
+(* --- PRIVATE KEYS --- *)
+free sk_elect: skey [private].
+
+(* --- CONSTANTS --- *)
+const V1, V2: vote.
+
+(* --- EVENTS --- *)
+event JudgeTracedA(bitstring).
+
+(* --- QUERIES ---
+   Expected: Observational equivalence is FALSE (attack exists) *)
+query b: bitstring; event(JudgeTracedA(b)).
+
+(* --- PROCESSES --- *)
+let processVoterA(sk_vA: skey, pk_elect_param: pkey) =
+    new s: seed;
+    let ballot_A = enc(V1, pk_elect_param, s) in
+    let tag_A    = make_tag(ballot_A, sk_vA) in
+    out(ch_submit, (ballot_A, tag_A));
+    out(ch_receipt, tag_A).
+
+let processVoterB(sk_vB: skey, pk_elect_param: pkey) =
+    new s: seed;
+    let ballot_B = enc(choice[V2, V1], pk_elect_param, s) in
+    let tag_B    = make_tag(ballot_B, sk_vB) in
+    out(ch_submit, (ballot_B, tag_B)).
+
+let processMixNode(pk_elect_param: pkey) =
+    in(ch_submit, (bA: bitstring, tA: tag_t));
+    in(ch_submit, (bB: bitstring, tB: tag_t));
+    new s1: seed; new s2: seed;
+    let bA_out = re_enc(bA, pk_elect_param, s1) in
+    let bB_out = re_enc(bB, pk_elect_param, s2) in
+    ( out(ch_pub, bA_out) | out(ch_pub, bB_out) ) |
+    (* BREAK: both trace entries now go to the PUBLIC channel *)
+    ( out(ch_trace, (tA, bA_out)) |
+      out(ch_trace, (tB, bB_out)) ).
+
+let processJudge =
+    in(ch_receipt, tag_A: tag_t);
+    in(ch_trace,   (tX: tag_t, bX: bitstring));
+    if tX = tag_A then
+    (
+        event JudgeTracedA(bX);
+        out(ch_pub, bX)
+    ).
+
+process
+    let pk_elect_pub = pk(sk_elect) in
+    out(ch_pub, pk_elect_pub);
+    new sk_vA: skey; new sk_vB: skey;
+    out(ch_pub, (pk(sk_vA), pk(sk_vB)));
+    (
+        processVoterA(sk_vA, pk_elect_pub) |
+        processVoterB(sk_vB, pk_elect_pub) |
+        processMixNode(pk_elect_pub)        |
+        processJudge
+    )

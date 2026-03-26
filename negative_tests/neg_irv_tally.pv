@@ -1,0 +1,118 @@
+(* ============================================================
+   NEGATIVE TEST: neg_irv_tally.pv
+   Source  : irv_tally.pv  (G-IRV)
+
+   BREAK: The Eliminated event is removed before Redistributed fires.
+   Without Eliminated(CandB) being recorded, the redistribution of
+   Voter1's vote from CandB to CandA has no causal predecessor.
+   G-IRV1 (Redistributed ==> Eliminated) therefore fails:
+   the tally can redistribute a vote without having eliminated
+   the candidate — modelling a malicious tally authority that
+   moves votes arbitrarily.
+
+   MECHANISM BROKEN:
+     Original:   event Eliminated(CandB);  (* fires before Redistributed *)
+     Broken:     line removed entirely     (* no Eliminated event fired   *)
+
+   EXPECTED RESULTS:
+     G-IRV1 (Redistributed ==> Eliminated)    : FAIL  <- attack found
+     G-IRV2 (WinnerDeclared ==> FirstPrefCounted) : true  (still holds)
+     G-IRV4a reachability (WinnerDeclared)    : false  (reachable)
+     G-IRV4b reachability (Redistributed)     : false  (reachable)
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type cand. type voter_t. type pref_t. type round_t.
+
+(* --- CHANNELS --- *)
+free ch_pub:   channel.
+free ch_tally: channel [private].
+
+(* --- PREFERENCE ENCODING --- *)
+fun make_pref(cand, cand, cand): pref_t.
+reduc forall c1: cand, c2: cand, c3: cand;
+      get_pref_1(make_pref(c1, c2, c3)) = c1.
+reduc forall c1: cand, c2: cand, c3: cand;
+      get_pref_2(make_pref(c1, c2, c3)) = c2.
+reduc forall c1: cand, c2: cand, c3: cand;
+      get_pref_3(make_pref(c1, c2, c3)) = c3.
+
+fun next_pref_after(pref_t, cand): cand
+reduc
+    forall c2: cand, c3: cand, elim: cand;
+        next_pref_after(make_pref(elim, c2, c3), elim) = c2.
+
+(* --- CONSTANTS --- *)
+const CandA, CandB, CandC: cand.
+const Round1, Round2: round_t.
+const Voter1, Voter2, Voter3, Voter4: voter_t.
+
+(* --- EVENTS --- *)
+event VoterSubmittedPref(voter_t, pref_t).
+event FirstPrefCounted(voter_t, cand, round_t).
+event Eliminated(cand).
+event Redistributed(voter_t, cand, cand).
+event WinnerDeclared(cand).
+
+(* === QUERIES === *)
+
+(* G-IRV1 - EXPECTED TO FAIL: Eliminated never fires for CandB,
+   but Redistributed(Voter1, CandB, CandA) still fires.
+   Expected: false or "cannot be proved" *)
+query v: voter_t, c_old: cand, c_new: cand;
+      event(Redistributed(v, c_old, c_new)) ==> event(Eliminated(c_old)).
+
+(* G-IRV2 - should still hold *)
+query w: cand, v: voter_t, r: round_t;
+      event(WinnerDeclared(w)) ==> event(FirstPrefCounted(v, w, r)).
+
+(* Reachability guards *)
+query w: cand; event(WinnerDeclared(w)).
+query v: voter_t, c1: cand, c2: cand; event(Redistributed(v, c1, c2)).
+
+(* === PROCESSES === *)
+
+let processVoter(v: voter_t, p: pref_t) =
+    event VoterSubmittedPref(v, p);
+    out(ch_tally, (v, p)).
+
+(* BROKEN TALLY: Eliminated(CandB) is not fired before redistribution *)
+let processTallyIRV_broken =
+    in(ch_tally, (=Voter1, p1: pref_t));
+    in(ch_tally, (=Voter2, p2: pref_t));
+    in(ch_tally, (=Voter3, p3: pref_t));
+    in(ch_tally, (=Voter4, p4: pref_t));
+
+    (* Round 1 counting *)
+    event FirstPrefCounted(Voter1, get_pref_1(p1), Round1);
+    event FirstPrefCounted(Voter2, get_pref_1(p2), Round1);
+    event FirstPrefCounted(Voter3, get_pref_1(p3), Round1);
+    event FirstPrefCounted(Voter4, get_pref_1(p4), Round1);
+
+    (* BREAK: event Eliminated(CandB) removed — redistribution has no cause *)
+
+    (* Redistributed fires without a preceding Eliminated event *)
+    let new_top1 = next_pref_after(p1, CandB) in
+    event Redistributed(Voter1, CandB, new_top1);
+
+    (* Round 2 *)
+    event FirstPrefCounted(Voter1, new_top1, Round2);
+    event FirstPrefCounted(Voter2, get_pref_1(p2), Round2);
+    event FirstPrefCounted(Voter3, get_pref_1(p3), Round2);
+    event FirstPrefCounted(Voter4, get_pref_1(p4), Round2);
+
+    event Eliminated(CandC);
+    event WinnerDeclared(CandA).
+
+process
+    let pref1 = make_pref(CandB, CandA, CandC) in
+    let pref2 = make_pref(CandA, CandB, CandC) in
+    let pref3 = make_pref(CandA, CandB, CandC) in
+    let pref4 = make_pref(CandC, CandA, CandB) in
+    (
+        processVoter(Voter1, pref1) |
+        processVoter(Voter2, pref2) |
+        processVoter(Voter3, pref3) |
+        processVoter(Voter4, pref4) |
+        processTallyIRV_broken
+    )

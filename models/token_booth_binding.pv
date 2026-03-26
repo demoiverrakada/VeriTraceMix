@@ -1,0 +1,164 @@
+(* ============================================================
+   TOKEN MECHANISM: BOOTH-BINDING & ISSUANCE PROVENANCE (G-TB)
+
+   *** SECURITY FINDING (discovered via formal verification) ***
+   The original token scheme uses only RSA-OAEP encryption:
+     token = enc(payload, pk_bmd_j, seed)
+   RSA-OAEP provides CONFIDENTIALITY but NOT SOURCE AUTHENTICATION.
+   Any party knowing pk_bmd_j can encrypt any payload to it.
+   ProVerif found the following attack (see neg_token_booth_binding.pv):
+     Attacker generates fresh voter_id vid_attacker,
+     constructs enc(make_payload(vid_attacker, Booth_j), pk_bmd_j, s),
+     sends to BMD_j -> BMD accepts and fires BMD_Used without AS_Issued.
+   This enables BALLOT STUFFING with forged voter identities.
+
+   *** FIX: Sign-then-Encrypt ***
+   The AS signs the payload with its own private key sk_as, then
+   encrypts (payload || AS_signature) to the target BMD's public key:
+     token = enc_auth(payload, sign(payload, sk_as), pk_bmd_j, seed)
+   The BMD:
+     1. Decrypts with sk_bmd_j
+     2. Verifies the AS signature with pk_as (published by EA)
+     3. Checks assigned_booth = my_booth_id
+   Only the AS can produce a valid signature, so forged tokens are
+   rejected at step 2.
+
+   Protocol:
+     1. EA publishes pk_as and {pk_bmd_j}
+     2. Voter V authenticates to AS (biometric + electoral roll)
+     3. AS: payload = make_payload(vid, booth_j)
+            sig    = sign(payload, sk_as)
+            token  = enc_auth(payload, sig, pk_bmd_j, seed)
+            AS_Issued(booth_j, vid) event fires
+            token written to voter's RFID card (ch_rfid -- public)
+     4. BMD_j: token arrives on ch_rfid (attacker may have tampered)
+            (payload', sig') = dec_auth(token, sk_bmd_j)
+            verify(sig', pk_as) must equal payload'  [AS auth]
+            assigned_booth = get_booth(payload')     [booth check]
+            if assigned_booth = my_booth_id:
+                BMD_Used(booth_j, vid') event fires
+
+   Properties verified:
+   G-TB1 (Booth-binding provenance):
+     BMD_Used(j, v) ==> AS_Issued(j, v)
+     After the fix: holds.
+   G-TB2 (Key secrecy — AS and BMD keys):
+     attacker cannot learn sk_as, sk_bmd1, sk_bmd2.
+   G-TB3 (Reachability):
+     BMD_Used is reachable on the honest path (non-vacuity guard).
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type voter_id.
+type booth_id.
+type skey.
+type pkey.
+type seed.
+
+(* --- CHANNELS --- *)
+free ch_rfid:   channel.          (* RFID channel: fully public / attacker-controlled *)
+free ch_public: channel.          (* Public parameter distribution *)
+
+(* --- CRYPTO: Asymmetric Signatures (AS authenticates the token) --- *)
+fun pk(skey): pkey.
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey;
+      verify(sign(m, k), pk(k)) = m.
+
+(* --- CRYPTO: Authenticated Encryption (Sign-then-Encrypt)
+   enc_auth(payload, as_sig, pk_bmd, seed) models RSA-OAEP applied
+   to the concatenation of payload and the AS signature.
+   Destructors extract each component after decryption with sk_bmd. *)
+fun enc_auth(bitstring, bitstring, pkey, seed): bitstring.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_payload(enc_auth(p, s, pk(k), r), k) = p.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_sig(enc_auth(p, s, pk(k), r), k) = s.
+
+(* --- PAYLOAD ENCODING --- *)
+fun make_payload(voter_id, booth_id): bitstring.
+reduc forall v: voter_id, b: booth_id;
+      get_vid(make_payload(v, b))   = v.
+reduc forall v: voter_id, b: booth_id;
+      get_booth(make_payload(v, b)) = b.
+
+(* --- PRIVATE KEYS (non-extractable) --- *)
+free sk_as:   skey [private].   (* AS signing key — only AS knows this *)
+free sk_bmd1: skey [private].   (* BMD1 decryption key *)
+free sk_bmd2: skey [private].   (* BMD2 decryption key *)
+
+(* Public booth identifiers *)
+free Booth1: booth_id.
+free Booth2: booth_id.
+
+(* --- EVENTS --- *)
+event AS_Issued(booth_id, voter_id).
+event BMD_Used(booth_id, voter_id).
+
+(* --- QUERIES --- *)
+
+(* G-TB1: Booth-binding provenance.
+   After the sign-then-encrypt fix, the AS signature prevents forging.
+   Expected: true *)
+query j: booth_id, v: voter_id;
+      event(BMD_Used(j, v)) ==> event(AS_Issued(j, v)).
+
+(* G-TB2: All private keys are non-extractable.
+   Expected: true for all three *)
+query attacker(sk_as).
+query attacker(sk_bmd1).
+query attacker(sk_bmd2).
+
+(* REACHABILITY: honest path fires (non-vacuity guard).
+   Expected: false in ProVerif = BMD_Used IS reachable *)
+query j: booth_id, v: voter_id; event(BMD_Used(j, v)).
+
+(* --- PROCESSES --- *)
+
+(* Authentication Server:
+   Assigns voter v to Booth1, signs the payload with sk_as,
+   encrypts to Booth1's BMD key, writes to RFID (public channel). *)
+let processAS(pk_b1: pkey, sk_as_param: skey, v: voter_id) =
+    let payload = make_payload(v, Booth1) in
+    let sig     = sign(payload, sk_as_param) in
+    new r: seed;
+    let token   = enc_auth(payload, sig, pk_b1, r) in
+    event AS_Issued(Booth1, v);
+    out(ch_rfid, token).
+
+(* BMD at booth `my_booth`:
+   1. Reads token from RFID (attacker may have sent forged message).
+   2. Decrypts with own private key — fails if wrong key used.
+   3. Verifies AS signature — rejects tokens not signed by AS.
+   4. Checks booth-id matches — rejects tokens issued for other booths.
+   5. Only if all checks pass: fires BMD_Used (ballot loaded). *)
+let processBMD(sk_bmd: skey, my_booth: booth_id, pk_as_param: pkey) =
+    in(ch_rfid, token: bitstring);
+    let payload  = dec_payload(token, sk_bmd)   in  (* step 2: decrypt *)
+    let sig      = dec_sig(token, sk_bmd)       in  (* step 2: extract sig *)
+    if verify(sig, pk_as_param) = payload       then (* step 3: verify AS sig *)
+    let vid      = get_vid(payload)             in
+    let assigned = get_booth(payload)           in
+    if assigned = my_booth                      then (* step 4: booth check *)
+        event BMD_Used(my_booth, vid).
+
+(* --- MAIN SYSTEM --- *)
+process
+    let pk_b1  = pk(sk_bmd1) in
+    let pk_b2  = pk(sk_bmd2) in
+    let pk_as0 = pk(sk_as)   in
+    (* Publish all public keys — attacker knows them *)
+    out(ch_public, (pk_b1, pk_b2, pk_as0));
+
+    new vid1: voter_id;
+
+    (
+        (* AS issues token for vid1 → Booth1 *)
+        processAS(pk_b1, sk_as, vid1)             |
+        (* BMD1 at Booth1: accepts legitimate token *)
+        processBMD(sk_bmd1, Booth1, pk_as0)       |
+        (* BMD2 at Booth2: cannot decrypt (wrong key);
+           even if attacker re-encrypts payload for pk_b2,
+           the forged AS signature will not verify with pk_as0. *)
+        processBMD(sk_bmd2, Booth2, pk_as0)
+    )

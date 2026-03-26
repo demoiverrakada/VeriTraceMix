@@ -1,0 +1,174 @@
+(* ============================================================
+   NEGATIVE TEST: neg_multi_election_eligibility.pv
+   Source  : multi_election_eligibility.pv  (G-MEL)
+
+   BREAK: The eligibility check in the BMD is REMOVED.
+   Without checking that the target election is in the voter's
+   eid_vector, ANY voter token grants access to ANY election.
+   A voter with eid_vector={Elec1} can now illegally cast in Elec2.
+
+   MECHANISM BROKEN:
+     Original BMD check:
+       if is_eligible_single(eid_vec, target_elec) = true
+       || is_eligible_pair(eid_vec, target_elec) = true then
+           event EligibleFor(tid, target_elec); ...
+     Broken (this file):
+       EligibleFor and BallotCast fire unconditionally — no eid check.
+
+   EXPECTED RESULTS:
+     G-MEL1 (BallotCast ==> EligibleFor)            : FAIL  <- cross-election access
+     G-MEL3 (inj BallotCast ==> inj EligibleFor)    : FAIL  <- double-vote possible
+     G-MEL4a reachability (BallotCast in Elec1)     : false  (reachable)
+     G-MEL4b reachability (BallotCast in Elec2)     : false  (reachable)
+
+   Note: G-MEL1 fails because EligibleFor fires for every election
+   regardless of eid_vector, so the causal link is broken — a voter
+   with eid_vector={Elec1} can trigger BallotCast(Elec2, tid) without
+   a legitimate EligibleFor(tid, Elec2) having been set by the AS.
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type skey. type pkey. type vote_t. type seed.
+type voter_id. type booth_id. type token_id. type election_id.
+type id_mark.
+
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_rfid:   channel.
+free ch_lock:   channel [private].
+
+(* --- CRYPTO --- *)
+fun pk(skey): pkey.
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; verify(sign(m, k), pk(k)) = m.
+
+fun enc_auth(bitstring, bitstring, pkey, seed): bitstring.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_payload(enc_auth(p, s, pk(k), r), k) = p.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_sig(enc_auth(p, s, pk(k), r), k) = s.
+
+fun eid_single(election_id): bitstring.
+fun eid_pair(election_id, election_id): bitstring.
+fun is_eligible_single(bitstring, election_id): bool
+    reduc forall e: election_id;
+          is_eligible_single(eid_single(e), e) = true.
+fun is_eligible_pair(bitstring, election_id): bool
+    reduc forall e1: election_id, e2: election_id;
+          is_eligible_pair(eid_pair(e1, e2), e1) = true;
+          forall e1: election_id, e2: election_id;
+          is_eligible_pair(eid_pair(e1, e2), e2) = true.
+
+fun make_payload(voter_id, token_id, booth_id, bitstring): bitstring.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_vid(make_payload(v, t, b, ev))    = v.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_tid(make_payload(v, t, b, ev))    = t.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_booth(make_payload(v, t, b, ev))  = b.
+reduc forall v: voter_id, t: token_id, b: booth_id, ev: bitstring;
+      get_eidvec(make_payload(v, t, b, ev)) = ev.
+
+fun enc_vote(vote_t, pkey, seed): bitstring.
+
+(* --- PRIVATE KEYS --- *)
+free sk_as:  skey [private].
+free sk_bmd: skey [private].
+
+(* --- CONSTANTS --- *)
+const Booth1: booth_id.
+const Elec1, Elec2: election_id.
+const CandidateA: vote_t.
+
+(* --- EVENTS --- *)
+event AS_Issued(voter_id, token_id, bitstring).
+event EligibleFor(token_id, election_id).
+event BallotCast(election_id, token_id).
+
+table NullifierRepo(election_id, token_id).
+
+(* --- QUERIES --- *)
+
+(* G-MEL1 - EXPECTED TO FAIL: BMD omits eid check, so V1 (eligible
+   only for Elec1) can trigger BallotCast(Elec2, tid) without a
+   legitimate EligibleFor(tid, Elec2).
+   Expected: false or "cannot be proved" *)
+query e: election_id, t: token_id;
+      event(BallotCast(e, t)) ==> event(EligibleFor(t, e)).
+
+(* G-MEL3 - EXPECTED TO FAIL *)
+query e: election_id, t: token_id;
+      inj-event(BallotCast(e, t)) ==> inj-event(EligibleFor(t, e)).
+
+(* Reachability *)
+query t: token_id; event(BallotCast(Elec1, t)).
+query t: token_id; event(BallotCast(Elec2, t)).
+
+(* --- PROCESSES --- *)
+
+let processAS(pk_bmd_j: pkey, sk_as_param: skey,
+              vid: voter_id, eid_vec: bitstring) =
+    new tid: token_id;
+    let payload = make_payload(vid, tid, Booth1, eid_vec) in
+    let sig     = sign(payload, sk_as_param) in
+    new r: seed;
+    let token   = enc_auth(payload, sig, pk_bmd_j, r) in
+    event AS_Issued(vid, tid, eid_vec);
+    out(ch_rfid, token).
+
+(* BROKEN BMD: eligibility check completely removed *)
+let processBMD_broken(sk_bmd_param: skey, pk_as_param: pkey,
+                      pk_elect: pkey, my_booth: booth_id,
+                      my_vote: vote_t, target_elec: election_id) =
+    in(ch_rfid, token: bitstring);
+    let payload  = dec_payload(token, sk_bmd_param) in
+    let sig      = dec_sig(token, sk_bmd_param)     in
+    if verify(sig, pk_as_param) = payload            then
+    let tid      = get_tid(payload)                  in
+    let assigned = get_booth(payload)                in
+    if assigned = my_booth                           then
+    (
+        (* BREAK: eid_vector check omitted — any voter can access any election *)
+        event EligibleFor(tid, target_elec);
+        out(ch_public, (tid, target_elec, my_vote))
+    ).
+
+let processBB_atomic =
+    !
+    in(ch_public, (t: token_id, e: election_id, v: vote_t));
+    in(ch_lock, _x: bool);
+    get NullifierRepo(=e, =t) in
+        out(ch_lock, true)
+    else
+    (
+        insert NullifierRepo(e, t);
+        event BallotCast(e, t);
+        new s: seed;
+        let pk_dummy = pk(sk_bmd) in
+        let ballot   = enc_vote(v, pk_dummy, s) in
+        out(ch_public, ballot);
+        out(ch_lock, true)
+    ).
+
+process
+    let pk_bmd_1 = pk(sk_bmd) in
+    let pk_as_0  = pk(sk_as)  in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    out(ch_public, (pk_bmd_1, pk_as_0, pk_elect, Elec1, Elec2));
+    new vid1: voter_id;
+    new vid2: voter_id;
+    out(ch_lock, true) |
+    (
+        (* V1 token: eligible for Elec1 only *)
+        processAS(pk_bmd_1, sk_as, vid1, eid_single(Elec1)) |
+        (* V2 token: eligible for both *)
+        processAS(pk_bmd_1, sk_as, vid2, eid_pair(Elec1, Elec2)) |
+
+        (* V1 (Elec1-only) attempts Elec2 — should fail but now succeeds due to break *)
+        processBMD_broken(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec2) |
+        processBMD_broken(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec1) |
+        processBMD_broken(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec1) |
+        processBMD_broken(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec2) |
+        processBMD_broken(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA, Elec1) |
+        processBB_atomic
+    )

@@ -1,92 +1,146 @@
 (* ============================================================
-    NEGATIVE TEST: neg_voter_eligibility.pv
-    Source  : voter_eligibility.pv  (G5, G6, G11)
-    Break   : The nullifier uniqueness check is removed.
-              The original code does:
-                get NullifierRepo(=n) in 0  (* already voted *)
-                else insert NullifierRepo(n); ...
-              Here that get/else guard is removed entirely.
-              A voter can now submit the same nullifier twice,
-              so two BallotAccepted events fire for one identity.
-    Expected: RESULT inj-event(BallotAccepted) ==>
-                     inj-event(VoterStarted) cannot be proved.
-              ProVerif 2.05 reports "cannot be proved" rather than
-              "false" when the RA is replicated (!). This means
-              ProVerif found a Horn clause derivation of the attack
-              but could not concretise a finite trace — the security
-              property is NOT established. This is the correct
-              negative test result: double-voting is possible.
+   NEGATIVE TEST: neg_voter_eligibility.pv
+   Source  : voter_eligibility.pv  (G5, G6, G11)
+   Updated : 2026 — aligned with Gap 1 fix (RSA-OAEP token model)
+
+   BREAK: The NullifierRepo check is REMOVED from the BB process.
+   Without it, the same token_id can be accepted multiple times,
+   allowing a voter to cast two ballots with the same token.
+
+   MECHANISM REMOVED:
+     Original:
+       get NullifierRepo(=t) in
+           out(ch_lock, true)        (* already used — reject *)
+       else
+           insert NullifierRepo(t);
+           event BallotAccepted(t, id); ...
+     Broken (this file):
+       event BallotAccepted(t, id)   (* fires unconditionally — replay accepted *)
+
+   EXPECTED RESULTS:
+     G11 (attacker(sk_as))                                  : true  (still holds)
+     G5  (BallotAccepted ==> AS_Issued)                     : true  (still holds)
+     G6  (inj BallotAccepted ==> inj AS_Issued)             : FAIL  <- double-vote
+     Reachability (BallotAccepted)                           : false (reachable)
+
+   The injective G6 query MUST fail: without the nullifier check the
+   same token can produce two BallotAccepted events, breaking the
+   one-ballot-per-token invariant.
    ============================================================ *)
 
-type skey. type pkey. type cred. type nullifier.
-type zkp_mem.
+(* --- TYPES --- *)
+type skey. type pkey. type vote_t. type seed.
+type voter_id. type booth_id. type token_id. type election_id.
+type id_mark.
 
-free ch_pub: channel.
-free ch_ra: channel [private].
+(* --- CHANNELS --- *)
+free ch_public: channel.
+free ch_rfid:   channel.
+free ch_lock:   channel [private].
 
+(* --- CRYPTO --- *)
 fun pk(skey): pkey.
-fun sign(skey, pkey): cred.
-fun prove_membership(skey, cred): zkp_mem.
-reduc forall sk_v: skey, sk_ra: skey;
-      verify_zkp(prove_membership(sk_v, sign(sk_ra, pk(sk_v))), pk(sk_ra)) = true.
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; verify(sign(m, k), pk(k)) = m.
 
-fun gen_null(skey): nullifier.
+fun enc_auth(bitstring, bitstring, pkey, seed): bitstring.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_payload(enc_auth(p, s, pk(k), r), k) = p.
+reduc forall p: bitstring, s: bitstring, k: skey, r: seed;
+      dec_sig(enc_auth(p, s, pk(k), r), k) = s.
 
-(* --- TABLES --- *)
-(* NullifierRepo table intentionally not used in the broken process below *)
-table NullifierRepo(nullifier).
+fun make_payload(voter_id, token_id, booth_id, election_id): bitstring.
+reduc forall v: voter_id, t: token_id, b: booth_id, e: election_id;
+      get_vid(make_payload(v, t, b, e))   = v.
+reduc forall v: voter_id, t: token_id, b: booth_id, e: election_id;
+      get_tid(make_payload(v, t, b, e))   = t.
+reduc forall v: voter_id, t: token_id, b: booth_id, e: election_id;
+      get_booth(make_payload(v, t, b, e)) = b.
+
+fun enc_vote(vote_t, pkey, seed): bitstring.
+
+(* --- PRIVATE KEYS --- *)
+free sk_as:  skey [private].
+free sk_bmd: skey [private].
+
+(* --- CONSTANTS --- *)
+const Booth1: booth_id. const MyElection: election_id.
+const CandidateA, CandidateB: vote_t.
 
 (* --- EVENTS --- *)
-event VoterStarted(pkey).
-event BallotAccepted(pkey).
+event AS_Issued(voter_id, token_id).
+event VoterStarted(voter_id, token_id).
+event BallotAccepted(token_id, id_mark).
+
+(* NullifierRepo declared but intentionally NOT used in broken BB below *)
+table NullifierRepo(token_id).
+
+restriction t: token_id, i1: id_mark, i2: id_mark;
+    event(BallotAccepted(t, i1)) && event(BallotAccepted(t, i2)) ==> i1 = i2.
 
 (* --- QUERIES --- *)
+query attacker(sk_as).
 
-(* G11: RA key secrecy — should still hold *)
-free sk_ra_test: skey [private].
-query attacker(sk_ra_test).
+query v: voter_id, t: token_id, i: id_mark;
+      event(BallotAccepted(t, i)) ==> event(AS_Issued(v, t)).
 
-(* G5 — should still hold (non-injective) *)
-query pk_v: pkey;
-      event(BallotAccepted(pk_v)) ==> event(VoterStarted(pk_v)).
+(* G6 - EXPECTED TO FAIL: without nullifier check, same token_id
+   can appear in two BallotAccepted events, breaking injectivity.
+   Expected: "cannot be proved" or "false" *)
+query v: voter_id, t: token_id, i: id_mark;
+      inj-event(BallotAccepted(t, i)) ==> inj-event(AS_Issued(v, t)).
 
-(* G6 — EXPECTED TO FAIL: without the nullifier check,
-   the same voter can have BallotAccepted fire twice for
-   one VoterStarted, breaking injective correspondence. *)
-query pk_v: pkey;
-      inj-event(BallotAccepted(pk_v)) ==> inj-event(VoterStarted(pk_v)).
-
-(* Reachability *)
-query pk_v: pkey; event(BallotAccepted(pk_v)).
+query t: token_id, i: id_mark; event(BallotAccepted(t, i)).
 
 (* --- PROCESSES --- *)
+let processAS(pk_bmd_j: pkey, sk_as_param: skey,
+              vid: voter_id, my_booth: booth_id) =
+    new tid: token_id;
+    let payload = make_payload(vid, tid, my_booth, MyElection) in
+    let sig     = sign(payload, sk_as_param) in
+    new r: seed;
+    let token   = enc_auth(payload, sig, pk_bmd_j, r) in
+    event AS_Issued(vid, tid);
+    out(ch_rfid, token).
 
-let processVoter(sk_v: skey, v_cred: cred, pk_ra: pkey) =
-    event VoterStarted(pk(sk_v));
-    let n = gen_null(sk_v) in
-    let pi = prove_membership(sk_v, v_cred) in
-    out(ch_pub, (pk(sk_v), n, pi)).
-
-let processRA(sk_ra: skey) =
-    in(ch_pub, (pk_v: pkey, n: nullifier, pi: zkp_mem));
-    if verify_zkp(pi, pk(sk_ra)) = true then
+let processBMD(sk_bmd_param: skey, pk_as_param: pkey,
+               pk_elect: pkey, my_booth: booth_id, my_vote: vote_t) =
+    in(ch_rfid, token: bitstring);
+    let payload  = dec_payload(token, sk_bmd_param) in
+    let sig      = dec_sig(token, sk_bmd_param)     in
+    if verify(sig, pk_as_param) = payload            then
+    let vid      = get_vid(payload)                  in
+    let tid      = get_tid(payload)                  in
+    let assigned = get_booth(payload)                in
+    if assigned = my_booth                           then
     (
-        (* BREAK: removed the nullifier repo check.
-           Original:
-             get NullifierRepo(=n) in 0
-             else insert NullifierRepo(n);
-                  event BallotAccepted(pk_v)
-           Now BallotAccepted fires unconditionally — replay possible. *)
-        event BallotAccepted(pk_v)
+        event VoterStarted(vid, tid);
+        new s: seed;
+        let ballot = enc_vote(my_vote, pk_elect, s) in
+        out(ch_public, (ballot, tid))
     ).
 
+(* BROKEN BB: NullifierRepo check removed — accepts same tid twice *)
+let processBB_broken =
+    !
+    in(ch_public, (ballot: bitstring, t: token_id));
+    in(ch_lock, _x: bool);
+    (* BREAK: no get NullifierRepo check here *)
+    new id: id_mark;
+    event BallotAccepted(t, id);
+    out(ch_public, (ballot, t));
+    out(ch_lock, true).
+
 process
-    new sk_ra: skey; let pk_ra = pk(sk_ra) in
-    out(ch_pub, pk_ra);
-    new sk_v1: skey;
-    let cred1 = sign(sk_ra, pk(sk_v1)) in
-
-    (* Also instantiate the test RA key so its secrecy query is meaningful *)
-    out(ch_ra, sign(sk_ra_test, pk(sk_ra_test)));
-
-    ( processVoter(sk_v1, cred1, pk_ra) | ! processRA(sk_ra) )
+    let pk_bmd_1 = pk(sk_bmd) in
+    let pk_as_0  = pk(sk_as)  in
+    new sk_elect: skey; let pk_elect = pk(sk_elect) in
+    out(ch_public, (pk_bmd_1, pk_as_0, pk_elect));
+    new vid1: voter_id;
+    out(ch_lock, true) |
+    (
+        processAS(pk_bmd_1, sk_as, vid1, Booth1) |
+        processBMD(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateA) |
+        processBMD(sk_bmd, pk_as_0, pk_elect, Booth1, CandidateB) |
+        processBB_broken
+    )

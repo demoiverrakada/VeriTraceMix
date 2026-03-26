@@ -1,0 +1,124 @@
+(* ============================================================
+   NEGATIVE TEST: TOKEN FORGEABILITY ATTACK (G-TB1 broken)
+
+   This file models the CURRENT implementation of the token
+   scheme and demonstrates that G-TB1 does NOT hold.
+
+   What the current system does:
+     token = enc(make_payload(vid, booth_j), pk_bmd_j, seed)
+     — RSA-OAEP encryption only, NO AS signature inside.
+
+   The attack (found by ProVerif):
+     The Dolev-Yao attacker knows pk_bmd1 and pk_bmd2 (public).
+     It also knows Booth1, Booth2 (public constants).
+     In ProVerif's model, the attacker can generate fresh terms
+     of any type, including voter_id. Call this vid_attacker.
+
+     Attacker constructs:
+       forged = enc(make_payload(vid_attacker, Booth1), pk_bmd1, fresh_seed)
+     Attacker sends forged to processBMD(sk_bmd1, Booth1).
+     BMD decrypts successfully (enc was to pk_bmd1).
+     Booth check: Booth1 = Booth1 -> PASS.
+     BMD fires: BMD_Used(Booth1, vid_attacker).
+
+     AS_Issued(Booth1, vid_attacker) was NEVER fired.
+     -> G-TB1 is violated.
+
+   Real-world consequence:
+     An attacker who knows the BMD's public key (which is
+     distributed openly) can create RFID cards containing
+     forged tokens for any voter_id and any booth. The BMD
+     accepts them because it has no way to verify the token
+     originated from the Authentication Server.
+     This enables BALLOT STUFFING with fabricated voter identities.
+
+   Fix (modelled in token_booth_binding.pv):
+     Add an AS signature inside the encrypted token.
+     The BMD verifies the AS signature after decryption.
+     Forged tokens are rejected because the attacker cannot
+     produce a valid signature without sk_as (non-extractable).
+
+   Expected result for G-TB1:
+     RESULT ... is false   (attack found — correct for negative test)
+   ============================================================ *)
+
+(* --- TYPES --- *)
+type voter_id.
+type booth_id.
+type skey.
+type pkey.
+type seed.
+
+(* --- CHANNELS --- *)
+free ch_rfid:   channel.
+free ch_public: channel.
+
+(* --- CRYPTO: Encryption ONLY (no AS signature — current implementation) --- *)
+fun pk(skey): pkey.
+fun enc(bitstring, pkey, seed): bitstring.
+reduc forall p: bitstring, k: skey, s: seed;
+      dec(enc(p, pk(k), s), k) = p.
+
+(* --- PAYLOAD ENCODING --- *)
+fun make_payload(voter_id, booth_id): bitstring.
+reduc forall v: voter_id, b: booth_id;
+      get_vid(make_payload(v, b))   = v.
+reduc forall v: voter_id, b: booth_id;
+      get_booth(make_payload(v, b)) = b.
+
+(* --- PRIVATE KEYS --- *)
+free sk_bmd1: skey [private].
+free sk_bmd2: skey [private].
+
+free Booth1: booth_id.
+free Booth2: booth_id.
+
+(* --- EVENTS --- *)
+event AS_Issued(booth_id, voter_id).
+event BMD_Used(booth_id, voter_id).
+
+(* --- QUERIES --- *)
+
+(* G-TB1: Expected to FAIL — attack trace will be found.
+   The attacker forges a token without AS involvement.
+   Expected: false *)
+query j: booth_id, v: voter_id;
+      event(BMD_Used(j, v)) ==> event(AS_Issued(j, v)).
+
+(* Reachability: BMD_Used IS reachable (confirms attack path fires).
+   Expected: false = reachable *)
+query j: booth_id, v: voter_id; event(BMD_Used(j, v)).
+
+(* --- PROCESSES --- *)
+
+(* Legitimate AS: issues a token for vid1 to Booth1.
+   Note: no signature — just encryption. *)
+let processAS(pk_b1: pkey, v: voter_id) =
+    let payload = make_payload(v, Booth1) in
+    new r: seed;
+    let token = enc(payload, pk_b1, r) in
+    event AS_Issued(Booth1, v);
+    out(ch_rfid, token).
+
+(* BMD WITHOUT AS signature check (current implementation).
+   Accepts any bitstring that decrypts correctly and passes booth check. *)
+let processBMD(sk_bmd: skey, my_booth: booth_id) =
+    in(ch_rfid, token: bitstring);
+    let payload  = dec(token, sk_bmd) in   (* decrypt *)
+    let vid      = get_vid(payload)   in
+    let assigned = get_booth(payload) in
+    if assigned = my_booth            then  (* booth check — but no AS auth *)
+        event BMD_Used(my_booth, vid).
+
+process
+    let pk_b1 = pk(sk_bmd1) in
+    let pk_b2 = pk(sk_bmd2) in
+    out(ch_public, (pk_b1, pk_b2));   (* attacker learns both public keys *)
+
+    new vid1: voter_id;
+
+    (
+        processAS(pk_b1, vid1)        |   (* AS issues for Booth1 only *)
+        processBMD(sk_bmd1, Booth1)   |   (* ATTACK: attacker forges token for vid_attacker *)
+        processBMD(sk_bmd2, Booth2)       (* Same attack applies here *)
+    )
