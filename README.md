@@ -3,7 +3,7 @@
 [![ProVerif](https://img.shields.io/badge/Verified%20with-ProVerif%202.05-blue)](https://bblanche.gitlabpages.inria.fr/proverif/)
 [![Security](https://img.shields.io/badge/Properties-G1--G15%20%2B%20G--TB%20G--TANON%20G--TRACE%20G--IRV%20G--MEL-green)](#security-goals-mapping)
 [![Build](https://img.shields.io/badge/Status-Verified-success)](#verification-results-summary)
-[![Gaps](https://img.shields.io/badge/Gap%20Fixes-6%20resolved-brightgreen)](#2026-gap-fixes)
+[![Gaps](https://img.shields.io/badge/Gaps-4%20resolved%2C%202%20documented-brightgreen)](#2026-gap-fixes)
 
 ## 📌 Project Overview
 
@@ -20,7 +20,7 @@ Using **Applied Pi-Calculus** and the **ProVerif** automated reasoning tool, thi
 - **Traceable Mixnet (NEW):** Formally proves the coexistence of traceability (judge CAN trace a ballot) and anonymity (tracing does NOT reveal other voters). This is our core contribution over OpenVoting.
 - **IRV Preferential Voting (NEW):** Models symbolic redistribution soundness for Instant Runoff Voting — our extension to top-k multi-winner elections.
 - **Multi-Election Eligibility (NEW):** Formally verifies the eid_vector mechanism that allows one token to grant access to multiple elections while preventing cross-election abuse.
-- **Negative Tests:** Eleven companion files in `negative_tests/` each break exactly one security mechanism. ProVerif must find an attack in every case, confirming the positive proofs are not vacuous.
+- **Negative Tests:** Eleven companion files in `negative_tests/` each break exactly one security mechanism. ProVerif must find an attack in every case, confirming the positive proofs are not vacuous. Exception: for the privacy goals G8 and G9, removing the re-encryption or leaking partial decryptions does not make ProVerif find an attack, so their negative tests leak a key instead (see [Negative Tests for Privacy Goals](#negative-tests-for-privacy-goals-g8-and-g9)). Those two proofs therefore do not show that the mixnet itself is needed.
 
 ---
 
@@ -50,7 +50,7 @@ Each file verifies a specific subset of the 15 security goals:
 
 ## 🔬 2026 Gap Fixes
 
-Six gaps in the original model were identified and resolved:
+Six gaps in the original model were identified. Four were resolved; two (Gaps 4 and 5) are documented as outside the model's scope:
 
 ### Gap 1 — Authentication Model Inconsistency (RESOLVED)
 **Problem:** `voter_eligibility.pv` used a ZKP-based credential (`prove_membership`) while `token_booth_binding.pv` and the actual implementation used RSA-OAEP sign-then-encrypt tokens. Two contradictory authentication models existed.
